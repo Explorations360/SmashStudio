@@ -68,7 +68,7 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
           </span>
         </div>
 
-        <textarea [(ngModel)]="seg.textV3" rows="3" (ngModelChange)="touch(seg)"
+        <textarea #txt [(ngModel)]="seg.textV3" rows="3" (ngModelChange)="touch(seg)"
           class="w-full border rounded px-2 py-1 text-sm" placeholder="Texte lu par cette voix (balises [pause], [chaleureux]… acceptées)"></textarea>
 
         <div class="flex flex-wrap items-center gap-2 mt-1.5">
@@ -77,6 +77,9 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
             class="text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded disabled:opacity-40">
             {{ tagBusy().has(seg.id) ? '✨ Balisage…' : '✨ Baliser (IA)' }}
           </button>
+          <button (click)="split(i, txt)" [disabled]="!seg.textV3.trim()"
+            title="Sélectionne une portion du texte puis clique ici : la sélection devient un nouveau segment juste en dessous (même voix, modifiable). Sans sélection, coupe à la position du curseur."
+            class="text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded disabled:opacity-40">✂ Scinder</button>
           <label class="text-xs text-slate-400 flex items-center gap-1.5">Pause après (s)
             <input [(ngModel)]="seg.silenceAfter" type="number" step="0.1" min="0" max="10"
               [placeholder]="'global : ' + settings.segmentGap"
@@ -189,6 +192,28 @@ export class SoundEditComponent implements OnInit, OnDestroy {
     this.model.segments = [...this.model.segments, blankSegment(slot)];
   }
   removeSegment(i: number) { this.model.segments = this.model.segments.filter((_, idx) => idx !== i); }
+
+  // scinde le segment : la sélection du textarea devient un nouveau segment juste
+  // en dessous ; le texte situé après la sélection forme un 3e segment (ordre préservé)
+  split(i: number, ta: HTMLTextAreaElement) {
+    const seg = this.model.segments[i];
+    const value = ta.value;
+    let a = ta.selectionStart ?? 0, b = ta.selectionEnd ?? 0;
+    if (a > b) [a, b] = [b, a];
+    if (a === b) b = value.length; // pas de sélection → coupe au curseur
+    const parts = [value.slice(0, a), value.slice(a, b), value.slice(b)]
+      .map((t) => t.trim()).filter((t) => t);
+    if (parts.length < 2) { this.toast.error('Sélectionne une portion du texte (ou place le curseur au point de coupe).'); return; }
+
+    seg.textV3 = parts[0];
+    this.touch(seg);
+    const extras: Segment[] = parts.slice(1).map((t) => ({
+      ...blankSegment(), voiceId: seg.voiceId, voiceName: seg.voiceName, textV3: t,
+    }));
+    this.model.segments = [
+      ...this.model.segments.slice(0, i + 1), ...extras, ...this.model.segments.slice(i + 1),
+    ];
+  }
   move(i: number, delta: number) {
     const j = i + delta;
     if (j < 0 || j >= this.model.segments.length) return;
