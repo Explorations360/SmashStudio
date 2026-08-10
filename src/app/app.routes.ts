@@ -13,6 +13,7 @@ export const routes: Routes = [
       { path: 'sounds', loadComponent: () => import('./pages/sounds/sounds.component').then((m) => m.SoundsComponent) },
       { path: 'sounds/new', loadComponent: () => import('./pages/sound-edit/sound-edit.component').then((m) => m.SoundEditComponent), canActivate: [editorGuard] },
       { path: 'sounds/:id', loadComponent: () => import('./pages/sound-edit/sound-edit.component').then((m) => m.SoundEditComponent), canActivate: [editorGuard] },
+      { path: 'import', loadComponent: () => import('./pages/import/import.component').then((m) => m.ImportComponent), canActivate: [editorGuard] },
       { path: 'settings', loadComponent: () => import('./pages/settings/settings.component').then((m) => m.SettingsComponent), canActivate: [editorGuard] },
       { path: 'accounts', loadComponent: () => import('./pages/accounts/accounts.component').then((m) => m.AccountsComponent), canActivate: [adminGuard] },
     ],

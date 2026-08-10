@@ -19,6 +19,7 @@ import { ConfirmDialogComponent } from '../core/confirm-dialog.component';
       <nav class="flex gap-4 text-sm">
         <a routerLink="/sounds" routerLinkActive="text-brand-400" class="hover:text-brand-300">Sons</a>
         @if (auth.canEdit()) {
+          <a routerLink="/import" routerLinkActive="text-brand-400" class="hover:text-brand-300">Import</a>
           <a routerLink="/settings" routerLinkActive="text-brand-400" class="hover:text-brand-300">Réglages</a>
         }
         @if (auth.isAdmin()) {
