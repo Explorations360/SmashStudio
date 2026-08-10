@@ -1,0 +1,489 @@
+import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { defineSecret } from 'firebase-functions/params';
+import { logger } from 'firebase-functions/v2';
+import * as admin from 'firebase-admin';
+import Anthropic from '@anthropic-ai/sdk';
+import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as nodePath from 'path';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const ffmpegPath: string = require('ffmpeg-static');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const ffprobePath: string = require('ffprobe-static').path;
+
+admin.initializeApp();
+const db = admin.firestore();
+const bucket = admin.storage().bucket();
+
+const ELEVENLABS_API_KEY = defineSecret('ELEVENLABS_API_KEY');
+const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
+const REGION = 'europe-west1';
+
+/** Espace de travail partagé : l'accès se joue sur le rôle, pas sur la propriété du son. */
+async function assertEditor(uid: string) {
+  const u = await db.collection('users').doc(uid).get();
+  const p = u.data() as any;
+  if (!u.exists || p?.approved !== true || (p?.role !== 'admin' && p?.role !== 'editor')) {
+    logger.warn('assertEditor: refusé', { uid, profileExists: u.exists, role: p?.role, approved: p?.approved });
+    throw new HttpsError('permission-denied', 'Compte éditeur approuvé requis');
+  }
+  logger.info('assertEditor: ok', { uid, role: p.role });
+}
+async function loadSound(soundId: string) {
+  const snap = await db.collection('sounds').doc(soundId).get();
+  if (!snap.exists) {
+    logger.warn('loadSound: son introuvable', { soundId });
+    throw new HttpsError('not-found', 'Son introuvable');
+  }
+  const sound = snap.data() as any;
+  logger.info('loadSound: ok', { soundId, title: sound.title, segments: (sound.segments ?? []).length, assemblyStatus: sound.assemblyStatus });
+  return { ref: snap.ref, sound };
+}
+async function loadSettings() {
+  const s = await db.collection('settings').doc('global').get();
+  if (!s.exists) {
+    logger.warn('loadSettings: aucun doc réglages');
+    throw new HttpsError('failed-precondition', 'Réglages manquants (page Réglages)');
+  }
+  const st = s.data() as any;
+  logger.info('loadSettings: ok', { modelId: st.modelId, voices: (st.voices ?? []).length });
+  return st;
+}
+
+/** Consommation / crédits restants ElevenLabs (pour la page réglages). */
+export const getUsage = onCall(
+  { region: REGION, secrets: [ELEVENLABS_API_KEY], timeoutSeconds: 30 },
+  async (req) => {
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+
+    const [eleven, claude] = await Promise.all([
+      // ElevenLabs : abonnement + caractères
+      fetch('https://api.elevenlabs.io/v1/user/subscription', { headers: { 'xi-api-key': ELEVENLABS_API_KEY.value() } })
+        .then(async (r) => {
+          const j: any = await r.json().catch(() => null);
+          if (!r.ok) { logger.error('getUsage: ElevenLabs en erreur', { status: r.status, body: JSON.stringify(j).slice(0, 300) }); return { error: 'HTTP ' + r.status }; }
+          return {
+            tier: j.tier ?? '',
+            used: j.character_count ?? 0,
+            limit: j.character_limit ?? 0,
+            resetAt: j.next_character_count_reset_unix ? j.next_character_count_reset_unix * 1000 : null,
+          };
+        })
+        .catch((e: any) => ({ error: String(e?.message || e) })),
+      // Claude : consommation comptée par nos soins (le solde de crédits n'est pas exposé par l'API)
+      (async () => {
+        const month = new Date().toISOString().slice(0, 7);
+        const s = await db.collection('stats').doc('claude-' + month).get();
+        const d = (s.data() ?? {}) as any;
+        const inputTokens = d.inputTokens ?? 0;
+        const outputTokens = d.outputTokens ?? 0;
+        // tarifs Claude Opus 4.8 : 5 $/M tokens en entrée, 25 $/M en sortie
+        const estCostUsd = (inputTokens * 5 + outputTokens * 25) / 1_000_000;
+        return { month, calls: d.calls ?? 0, inputTokens, outputTokens, estCostUsd };
+      })().catch((e: any) => ({ error: String(e?.message || e) })),
+    ]);
+
+    logger.info('getUsage: ok', { eleven, claude });
+    return { eleven, claude };
+  }
+);
+
+/** 0) Liste les voix disponibles sur le compte ElevenLabs (pour la palette des réglages). */
+export const listVoices = onCall(
+  { region: REGION, secrets: [ELEVENLABS_API_KEY], timeoutSeconds: 30 },
+  async (req) => {
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+
+    const resp = await fetch('https://api.elevenlabs.io/v1/voices', {
+      headers: { 'xi-api-key': ELEVENLABS_API_KEY.value() },
+    });
+    if (!resp.ok) {
+      const body = (await resp.text()).slice(0, 500);
+      logger.error('listVoices: ElevenLabs en erreur', { status: resp.status, body });
+      throw new HttpsError('internal', 'ElevenLabs: ' + resp.status + ' ' + body.slice(0, 300));
+    }
+    const json: any = await resp.json();
+    // voix créées (cloned/generated/professional) d'abord, voix d'usine (premade) ensuite
+    const voices = (json?.voices ?? [])
+      .map((v: any) => ({ voiceId: v.voice_id, name: v.name, category: v.category ?? '' }))
+      .sort((a: any, b: any) =>
+        (a.category === 'premade' ? 1 : 0) - (b.category === 'premade' ? 1 : 0) || a.name.localeCompare(b.name));
+    logger.info('listVoices: ok', { count: voices.length });
+    return { voices };
+  }
+);
+
+/** 1) Génère l'audio ElevenLabs d'UN segment du son, le stocke, met à jour le segment. */
+export const generateSegment = onCall(
+  { region: REGION, secrets: [ELEVENLABS_API_KEY], timeoutSeconds: 120 },
+  async (req) => {
+    logger.info('generateSegment: appel', { uid: req.auth?.uid, data: req.data });
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const soundId = req.data?.soundId as string;
+    const segmentId = req.data?.segmentId as string;
+    if (!soundId || !segmentId) throw new HttpsError('invalid-argument', 'soundId/segmentId manquant');
+    const { ref, sound } = await loadSound(soundId);
+    const st = await loadSettings();
+
+    const segments: any[] = sound.segments ?? [];
+    const seg = segments.find((s) => s.id === segmentId);
+    if (!seg) throw new HttpsError('not-found', 'Segment introuvable dans ce son');
+    if (!seg.voiceId) throw new HttpsError('failed-precondition', 'Aucune voix choisie pour ce segment');
+    const text = seg.textV3 || seg.textPlain;
+    if (!text) throw new HttpsError('failed-precondition', 'Segment sans texte');
+
+    // met à jour le statut du segment dans le tableau (lecture-modification-écriture)
+    const patchSegment = async (patch: any) => {
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const segs: any[] = (snap.data()?.segments ?? []).map((s: any) =>
+          s.id === segmentId ? { ...s, ...patch } : s);
+        tx.update(ref, { segments: segs, updatedAt: Date.now() });
+      });
+    };
+
+    await patchSegment({ status: 'generating' });
+    try {
+      logger.info('generateSegment: appel ElevenLabs', { soundId, segmentId, voiceId: seg.voiceId, modelId: st.modelId || 'eleven_multilingual_v2', textLength: text.length });
+      const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${seg.voiceId}`, {
+        method: 'POST',
+        headers: { 'xi-api-key': ELEVENLABS_API_KEY.value(), 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
+        body: JSON.stringify({
+          text,
+          model_id: st.modelId || 'eleven_multilingual_v2',
+          voice_settings: { stability: st.stability ?? 0.4, similarity_boost: st.similarityBoost ?? 0.75, style: st.style ?? 0.3, use_speaker_boost: true },
+          output_format: 'mp3_44100_128',
+          // dictionnaire de prononciation partagé (synchronisé via syncPronunciation)
+          ...(st.pronDictId && st.pronDictVersionId ? {
+            pronunciation_dictionary_locators: [{ pronunciation_dictionary_id: st.pronDictId, version_id: st.pronDictVersionId }],
+          } : {}),
+        }),
+      });
+      if (!resp.ok) {
+        const body = (await resp.text()).slice(0, 500);
+        logger.error('generateSegment: ElevenLabs en erreur', { soundId, segmentId, status: resp.status, body });
+        throw new HttpsError('internal', 'ElevenLabs: ' + resp.status + ' ' + body.slice(0, 300));
+      }
+      const buf = Buffer.from(await resp.arrayBuffer());
+      logger.info('generateSegment: audio reçu', { soundId, segmentId, bytes: buf.length });
+
+      const path = `audio/sounds/${soundId}/${segmentId}.mp3`;
+      const file = bucket.file(path);
+      await file.save(buf, { metadata: { contentType: 'audio/mpeg' } });
+      // nécessite roles/iam.serviceAccountTokenCreator sur le compte de service de la fonction (signBlob)
+      const [url] = await file.getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      // un segment régénéré rend l'assemblage existant obsolète
+      await patchSegment({ status: 'generated', audioUrl: url, audioPath: path, chars: text.length, generatedAt: Date.now() });
+      if (sound.assemblyStatus === 'done') await ref.update({ assemblyStatus: 'stale', updatedAt: Date.now() });
+      logger.info('generateSegment: terminé', { soundId, segmentId, path });
+      return { ok: true, url };
+    } catch (e: any) {
+      logger.error('generateSegment: échec — ' + String(e?.message || e), { soundId, segmentId, code: e?.code, stack: e?.stack });
+      await patchSegment({ status: 'error' });
+      throw e instanceof HttpsError ? e : new HttpsError('internal', String(e?.message || e));
+    }
+  }
+);
+
+/** 2) Assemble les segments d'un son (dans l'ordre) en UN SEUL fichier MP3. */
+export const assembleSound = onCall(
+  { region: REGION, secrets: [], timeoutSeconds: 300, memory: '1GiB' },
+  async (req) => {
+    logger.info('assembleSound: appel', { uid: req.auth?.uid, data: req.data });
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const soundId = req.data?.soundId as string;
+    if (!soundId) throw new HttpsError('invalid-argument', 'soundId manquant');
+    const { ref, sound } = await loadSound(soundId);
+    let st: any = {};
+    try { st = await loadSettings(); } catch { /* défauts */ }
+
+    const segments: any[] = (sound.segments ?? []).filter((s: any) => (s.textV3 || s.textPlain));
+    if (!segments.length) throw new HttpsError('failed-precondition', 'Aucun segment dans ce son');
+    if (segments.length > 200) throw new HttpsError('invalid-argument', 'Trop de segments (max 200)');
+    const missing = segments.filter((s: any) => !s.audioPath || s.status !== 'generated');
+    if (missing.length) {
+      throw new HttpsError('failed-precondition',
+        'Segment(s) sans audio généré : ' + missing.map((s: any, i: number) => s.voiceName || ('#' + (i + 1))).join(', '));
+    }
+
+    const clampSil = (v: unknown, fallback: number) => {
+      const n = Number(v);
+      const eff = (v === null || v === undefined || v === '' || !isFinite(n)) ? fallback : n;
+      return Math.min(Math.max(eff, 0), 10);
+    };
+    const gapDefault = clampSil(st.segmentGap, 0.4);      // pause par défaut entre deux segments
+    const silBefore = clampSil(st.audioSilenceBefore, 0); // silence d'ouverture du fichier final
+    const silAfter = clampSil(st.audioSilenceAfter, 0);   // silence de clôture du fichier final
+
+    await ref.update({ assemblyStatus: 'assembling', updatedAt: Date.now() });
+    const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'smash-'));
+    try {
+      // télécharge chaque segment
+      const files: string[] = [];
+      for (const [i, seg] of segments.entries()) {
+        const dest = nodePath.join(tmp, `seg${String(i).padStart(3, '0')}.mp3`);
+        await bucket.file(seg.audioPath).download({ destination: dest });
+        files.push(dest);
+      }
+
+      // concat via filter_complex : pause (apad) après chaque segment sauf le dernier,
+      // silence d'ouverture (adelay) sur le premier, silence de clôture sur le dernier
+      const out = nodePath.join(tmp, 'final.mp3');
+      const inputs = files.flatMap((f) => ['-i', f]);
+      let fl = '';
+      const labels: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const filters: string[] = ['aformat=sample_rates=44100:channel_layouts=stereo'];
+        if (i === 0 && silBefore > 0) filters.push(`adelay=delays=${Math.round(silBefore * 1000)}:all=1`);
+        const gap = i < files.length - 1 ? clampSil(segments[i].silenceAfter, gapDefault) : silAfter;
+        if (gap > 0) filters.push(`apad=pad_dur=${gap}`);
+        fl += `[${i}:a]${filters.join(',')}[a${i}];`;
+        labels.push(`[a${i}]`);
+      }
+      fl += labels.join('') + `concat=n=${files.length}:v=0:a=1[out]`;
+      await runFfmpeg(['-y', ...inputs, '-filter_complex', fl, '-map', '[out]',
+        '-c:a', 'libmp3lame', '-b:a', '128k', out]);
+
+      const destPath = `audio/sounds/${soundId}/final.mp3`;
+      await bucket.upload(out, { destination: destPath, metadata: { contentType: 'audio/mpeg' } });
+      const [url] = await bucket.file(destPath).getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
+      let durationSec = 0;
+      try { durationSec = Math.round(parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', out]))); }
+      catch (e: any) { logger.warn('assembleSound: durée non mesurée — ' + String(e?.message || e)); }
+
+      await ref.update({
+        assemblyStatus: 'done', finalUrl: url, finalPath: destPath,
+        finalDurationSec: durationSec, finalSizeMb: sizeMb, assembledAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      logger.info('assembleSound: ok', { soundId, count: files.length, sizeMb, durationSec, destPath });
+      return { ok: true, url, count: files.length, sizeMb, durationSec };
+    } catch (e: any) {
+      logger.error('assembleSound: échec — ' + String(e?.message || e), { soundId, stack: e?.stack });
+      await ref.update({ assemblyStatus: 'error', updatedAt: Date.now() });
+      throw e instanceof HttpsError ? e : new HttpsError('internal', String(e?.message || e));
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* tmp éphémère */ }
+    }
+  }
+);
+
+/** 3) Réinitialise un son : supprime les fichiers stockés et remet les statuts à zéro. */
+export const resetSound = onCall(
+  { region: REGION, timeoutSeconds: 60 },
+  async (req) => {
+    logger.info('resetSound: appel', { uid: req.auth?.uid, data: req.data });
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const soundId = req.data?.soundId as string;
+    if (!soundId) throw new HttpsError('invalid-argument', 'soundId manquant');
+    const scope = (req.data?.scope as string) || 'all'; // 'all' | 'final'
+    if (!['all', 'final'].includes(scope)) throw new HttpsError('invalid-argument', 'scope invalide');
+    const { ref, sound } = await loadSound(soundId);
+
+    if (scope === 'all') {
+      // supprime tout le dossier du son (segments + final + orphelins de segments supprimés)
+      try {
+        await bucket.deleteFiles({ prefix: `audio/sounds/${soundId}/` });
+        logger.info('resetSound: dossier supprimé', { soundId });
+      } catch (e: any) { logger.warn('resetSound: suppression dossier échouée — ' + String(e?.message || e), { soundId }); }
+    } else if (sound.finalPath) {
+      try { await bucket.file(sound.finalPath).delete(); logger.info('resetSound: final supprimé', { soundId }); }
+      catch (e: any) { logger.warn('resetSound: suppression final échouée — ' + String(e?.message || e), { soundId }); }
+    }
+
+    const del = admin.firestore.FieldValue.delete();
+    const segments = (sound.segments ?? []).map((s: any) => scope === 'all'
+      ? { ...s, status: 'not_generated', audioUrl: null, audioPath: null, generatedAt: null }
+      : s);
+    await ref.update({
+      ...(scope === 'all' ? { segments } : {}),
+      assemblyStatus: 'none', finalUrl: del, finalPath: del,
+      finalDurationSec: del, finalSizeMb: del, assembledAt: del,
+      updatedAt: Date.now(),
+    });
+    logger.info('resetSound: ok', { soundId, scope });
+    return { ok: true, scope };
+  }
+);
+
+/** 4) Synchronise les règles de prononciation des réglages vers un dictionnaire ElevenLabs. */
+export const syncPronunciation = onCall(
+  { region: REGION, secrets: [ELEVENLABS_API_KEY], timeoutSeconds: 60 },
+  async (req) => {
+    logger.info('syncPronunciation: appel', { uid: req.auth?.uid });
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+
+    const sref = db.collection('settings').doc('global');
+    const sdoc = await sref.get();
+    const st = (sdoc.data() ?? {}) as any;
+    const rules = ((st.pronunciationRules ?? []) as any[])
+      .filter((r) => r?.word && (r?.alias || r?.ipa));
+    if (!rules.length) throw new HttpsError('failed-precondition', 'Aucune règle de prononciation renseignée');
+
+    // IPA prioritaire (précis, modèles v3/flash_v2), sinon alias (tous modèles)
+    const elevenRules = rules.map((r) =>
+      r.ipa
+        ? { string_to_replace: r.word, type: 'phoneme', phoneme: r.ipa, alphabet: 'ipa' }
+        : { string_to_replace: r.word, type: 'alias', alias: r.alias });
+
+    const headers = { 'xi-api-key': ELEVENLABS_API_KEY.value(), 'Content-Type': 'application/json' };
+    let dictId = (st.pronDictId as string) || '';
+    let versionId = '';
+
+    if (!dictId) {
+      const resp = await fetch('https://api.elevenlabs.io/v1/pronunciation-dictionaries/add-from-rules', {
+        method: 'POST', headers, body: JSON.stringify({ name: 'smash-studio', rules: elevenRules }),
+      });
+      const j: any = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        logger.error('syncPronunciation: création refusée', { status: resp.status, response: JSON.stringify(j).slice(0, 500) });
+        throw new HttpsError('internal', 'ElevenLabs: ' + JSON.stringify(j?.detail ?? j).slice(0, 300));
+      }
+      dictId = String(j?.id ?? '');
+      versionId = String(j?.version_id ?? j?.versionId ?? '');
+    } else {
+      // reconciliation : retire les règles de la synchro précédente, ajoute les actuelles
+      const prevWords: string[] = (st.pronSyncedWords ?? []) as string[];
+      if (prevWords.length) {
+        const rresp = await fetch(`https://api.elevenlabs.io/v1/pronunciation-dictionaries/${dictId}/remove-rules`, {
+          method: 'POST', headers, body: JSON.stringify({ rule_strings: prevWords }),
+        });
+        if (!rresp.ok) logger.warn('syncPronunciation: remove-rules refusé', { status: rresp.status, body: (await rresp.text()).slice(0, 300) });
+      }
+      const aresp = await fetch(`https://api.elevenlabs.io/v1/pronunciation-dictionaries/${dictId}/add-rules`, {
+        method: 'POST', headers, body: JSON.stringify({ rules: elevenRules }),
+      });
+      const aj: any = await aresp.json().catch(() => null);
+      if (!aresp.ok) {
+        logger.error('syncPronunciation: add-rules refusé', { status: aresp.status, response: JSON.stringify(aj).slice(0, 500) });
+        throw new HttpsError('internal', 'ElevenLabs: ' + JSON.stringify(aj?.detail ?? aj).slice(0, 300));
+      }
+      versionId = String(aj?.version_id ?? aj?.versionId ?? '');
+    }
+
+    if (!dictId || !versionId) throw new HttpsError('internal', 'Réponse ElevenLabs sans id/version de dictionnaire');
+    await sref.set({
+      pronDictId: dictId,
+      pronDictVersionId: versionId,
+      pronSyncedWords: rules.map((r) => r.word),
+      pronSyncedAt: Date.now(),
+    }, { merge: true });
+    logger.info('syncPronunciation: ok', { dictId, versionId, count: rules.length });
+    return { dictId, versionId, count: rules.length };
+  }
+);
+
+/** Comptabilise la consommation Claude du mois (affichée dans les réglages). */
+async function trackClaudeUsage(usage: Anthropic.Usage) {
+  try {
+    const month = new Date().toISOString().slice(0, 7); // "2026-07"
+    const inc = admin.firestore.FieldValue.increment;
+    await db.collection('stats').doc('claude-' + month).set({
+      calls: inc(1),
+      inputTokens: inc(usage.input_tokens ?? 0),
+      outputTokens: inc(usage.output_tokens ?? 0),
+      updatedAt: Date.now(),
+    }, { merge: true });
+  } catch (e: any) { logger.warn('trackClaudeUsage: comptage échoué — ' + String(e?.message || e)); }
+}
+
+/** 5) Rebalise un texte : ajoute les balises audio ElevenLabs v3 via Claude. */
+export const tagText = onCall(
+  { region: REGION, secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 120 },
+  async (req) => {
+    logger.info('tagText: appel', { uid: req.auth?.uid, textLength: (req.data?.text ?? '').length });
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const text = (req.data?.text as string ?? '').trim();
+    if (!text) throw new HttpsError('invalid-argument', 'Texte vide');
+
+    // réglages partagés (dynamisme, plafond, consignes), surchargeables via la requête
+    let st: any = {};
+    try { st = await loadSettings(); } catch { /* défauts */ }
+    const dynamism = (req.data?.dynamism as string) || (st.tagDynamism as string) || 'modere';
+    const maxTags = Math.min(Math.max(Number(req.data?.maxTags) || Number(st.tagMaxTags) || 3, 1), 15);
+    const dynamismRule = {
+      sobre: 'Registre SOBRE : uniquement des respirations et pauses naturelles ([pause], [soupire] léger). Aucune émotion marquée, aucun rire.',
+      modere: 'Registre MODÉRÉ : émotions discrètes uniquement là où le propos les rend évidentes, sinon pauses et respirations. Pas de théâtralité.',
+      expressif: 'Registre EXPRESSIF : interprétation vivante — varie les tons ([enthousiaste], [chaleureux], [curieux], [petit rire]…), marque les moments forts, tout en restant crédible pour un magazine audio professionnel.',
+    }[dynamism] ?? 'Registre modéré.';
+
+    const system = `Tu enrichis des textes de narration française avec les balises audio d'ElevenLabs v3 (modèle text-to-speech expressif).
+
+Règles strictes :
+- Tu ne modifies JAMAIS les mots du texte : mêmes mots, même ordre, même ponctuation. Tu ne fais qu'INSÉRER des balises entre crochets.
+- Balises disponibles (exemples) : [pause], [soupire], [rit], [petit rire], [chuchote], [enthousiaste], [curieux], [pensif], [sérieux], [chaleureux], [hésite]. Tu peux utiliser d'autres balises descriptives courtes en français si le ton l'exige.
+- ${dynamismRule}
+- Maximum ${maxTags} balise(s) au total dans le texte. Place-les seulement là où elles améliorent réellement l'interprétation.
+- Contexte : version audio d'un magazine professionnel agricole (plusieurs voix se partagent la lecture).${st.tagInstructions ? '\n- Consignes spécifiques du client : ' + st.tagInstructions : ''}
+- Réponds UNIQUEMENT avec le texte balisé, sans commentaire, sans guillemets autour.`;
+
+    logger.info('tagText: paramètres', { dynamism, maxTags, hasInstructions: !!st.tagInstructions, overrides: { dynamism: req.data?.dynamism ?? null, maxTags: req.data?.maxTags ?? null } });
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() });
+    let response: Anthropic.Message;
+    try {
+      response = await anthropic.messages.create({
+        model: 'claude-opus-4-8',
+        max_tokens: 4096,
+        thinking: { type: 'adaptive' },
+        system,
+        messages: [{ role: 'user', content: text }],
+      });
+    } catch (e: any) {
+      // fait remonter la vraie cause (clé invalide, crédits épuisés, modèle indisponible…)
+      logger.error('tagText: erreur API Claude — ' + String(e?.message || e), { status: e?.status, type: e?.type });
+      throw new HttpsError('internal', 'Claude: ' + String(e?.message || e).slice(0, 300));
+    }
+
+    if (response.stop_reason === 'refusal') {
+      logger.warn('tagText: refus du modèle', { uid });
+      throw new HttpsError('internal', 'Le modèle a refusé la requête');
+    }
+    const tagged = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+      .trim();
+    if (!tagged) throw new HttpsError('internal', 'Réponse vide du modèle');
+    logger.info('tagText: ok', { inLength: text.length, outLength: tagged.length, usage: response.usage });
+
+    await trackClaudeUsage(response.usage);
+    return { tagged };
+  }
+);
+
+function runFfmpeg(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, args);
+    let err = '';
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => code === 0 ? resolve() : reject(new Error('ffmpeg (' + code + '): ' + err.slice(-800))));
+  });
+}
+
+function runFfprobe(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffprobePath, ['-v', 'error', ...args]);
+    let out = ''; let err = '';
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => code === 0 ? resolve(out.trim()) : reject(new Error('ffprobe: ' + (err || out).slice(-300))));
+  });
+}

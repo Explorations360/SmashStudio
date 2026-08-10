@@ -1,0 +1,11 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Les fichiers audio sont écrits exclusivement par les Cloud Functions
+    // (Admin SDK, qui contourne ces règles) et lus via des URL signées.
+    // Aucun accès direct client n'est nécessaire.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

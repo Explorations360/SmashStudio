@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+    function me() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data; }
+    function isApproved() { return isSignedIn() && me().approved == true; }
+    function isAdmin() { return isApproved() && me().role == 'admin'; }
+    function isEditor() { return isApproved() && (me().role == 'admin' || me().role == 'editor'); }
+
+    match /users/{uid} {
+      // chacun lit son propre profil ; l'admin lit/gère tout le monde
+      allow get: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+      // création de son propre profil à la 1re connexion :
+      // toujours non approuvé en 'user', sauf l'email de bootstrap admin
+      // (doit rester synchronisé avec BOOTSTRAP_ADMINS dans users.service.ts)
+      allow create: if isSignedIn() && request.auth.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && (
+          (request.resource.data.role == 'user' && request.resource.data.approved == false)
+          || request.auth.token.email == 'immersion.tools@gmail.com'
+        );
+      // seuls les admins changent rôle / approbation
+      allow update, delete: if isAdmin();
+    }
+
+    match /sounds/{id} {
+      // lecture : tout compte approuvé ; écriture : éditeurs et admins
+      allow read: if isApproved();
+      allow create, update, delete: if isEditor();
+    }
+
+    // réglages partagés (doc unique 'global')
+    match /settings/{docId} {
+      allow read: if isEditor();
+      allow write: if isEditor();
+    }
+  }
+}

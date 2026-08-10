@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+/* Charte explorations360 : bleu foncé #00253d, orange #ed7402, police Outfit */
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+
+  --color-navy-950: #001625;
+  --color-navy-900: #00253d;
+  --color-navy-800: #06304c;
+  --color-navy-700: #0e3d5d;
+  --color-navy-600: #1c5077;
+
+  --color-brand-600: #d96900;
+  --color-brand-500: #ed7402;
+  --color-brand-400: #ff8c1f;
+  --color-brand-300: #ffab57;
+}
+
+@layer base {
+  body {
+    @apply bg-navy-950 text-slate-100 font-sans antialiased;
+  }
+  *, ::before, ::after {
+    border-color: color-mix(in srgb, white 14%, transparent);
+  }
+  input, select, textarea {
+    @apply bg-navy-900 text-slate-100 placeholder:text-slate-500;
+  }
+  option { @apply bg-navy-900 text-slate-100; }
+}
