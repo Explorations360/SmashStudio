@@ -38,6 +38,37 @@ export class SoundsService {
   update(id: string, patch: Partial<Sound>) { return updateDoc(doc(db, 'sounds', id), stripUndefined({ ...patch, updatedAt: Date.now() })); }
   remove(id: string) { return deleteDoc(doc(db, 'sounds', id)); }
 
+  /**
+   * Propage un changement de palette (Réglages) sur tous les segments qui utilisent
+   * le rôle : nouvelle voix + statut remis à « non généré » si la voix a changé.
+   */
+  async applyVoiceSlotChanges(changes: { oldLabel: string; newLabel: string; voiceId: string; voiceChanged: boolean }[]) {
+    let segs = 0, soundsTouched = 0, regen = 0;
+    for (const sound of this.sounds()) {
+      if (!sound.id) continue;
+      let touched = false, needsRegen = false;
+      const segments = sound.segments.map((s) => {
+        const ch = changes.find((c) => c.oldLabel && s.voiceName === c.oldLabel);
+        if (!ch || (s.voiceId === ch.voiceId && s.voiceName === ch.newLabel)) return s;
+        touched = true; segs++;
+        const resetStatus = ch.voiceChanged && s.status === 'generated';
+        if (resetStatus) { needsRegen = true; regen++; }
+        return {
+          ...s, voiceId: ch.voiceId, voiceName: ch.newLabel,
+          ...(resetStatus ? { status: 'not_generated' as const } : {}),
+        };
+      });
+      if (touched) {
+        soundsTouched++;
+        await this.update(sound.id, {
+          segments,
+          ...(needsRegen && (sound.assemblyStatus === 'done') ? { assemblyStatus: 'stale' as const } : {}),
+        });
+      }
+    }
+    return { segs, soundsTouched, regen };
+  }
+
   // réglages partagés par toute l'équipe (doc unique 'global')
   async getSettings(): Promise<Settings> {
     const s = await getDoc(doc(db, 'settings', 'global'));

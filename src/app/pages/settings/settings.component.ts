@@ -2,7 +2,8 @@ import { Component, inject, OnInit, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { SoundsService } from '../../core/sounds.service';
 import { ApiService, ElevenVoice, Usage } from '../../core/api.service';
-import { Settings, DEFAULT_SETTINGS } from '../../core/models';
+import { ToastService } from '../../core/toast.service';
+import { Settings, DEFAULT_SETTINGS, VoiceSlot } from '../../core/models';
 
 @Component({
   selector: 'app-settings',
@@ -156,7 +157,10 @@ import { Settings, DEFAULT_SETTINGS } from '../../core/models';
 export class SettingsComponent implements OnInit {
   private svc = inject(SoundsService);
   private api = inject(ApiService);
+  private toast = inject(ToastService);
   s: Settings = { ...DEFAULT_SETTINGS };
+  // palette telle que chargée, pour détecter les changements à l'enregistrement
+  private originalVoices: VoiceSlot[] = [];
   saved = signal(false);
   voices = signal<ElevenVoice[]>([]);
   voicesLoading = signal(true);
@@ -181,13 +185,38 @@ export class SettingsComponent implements OnInit {
 
   async ngOnInit() {
     this.s = await this.svc.getSettings();
+    this.originalVoices = (this.s.voices ?? []).map((v) => ({ ...v }));
     this.loadUsage();
     await this.api.listVoices()
       .then((v) => this.voices.set(v))
       .catch((e: any) => this.voicesError.set(e.message || String(e)))
       .finally(() => this.voicesLoading.set(false));
   }
-  async save() { await this.svc.saveSettings(this.s); this.saved.set(true); setTimeout(() => this.saved.set(false), 2000); }
+  async save() {
+    await this.svc.saveSettings(this.s);
+    // propage les changements de palette sur les segments existants
+    const changes = (this.s.voices ?? [])
+      .map((v, i) => {
+        const before = this.originalVoices[i];
+        if (!before?.label || !v.voiceId || !v.label) return null;
+        const voiceChanged = before.voiceId !== v.voiceId;
+        const labelChanged = before.label !== v.label;
+        if (!voiceChanged && !labelChanged) return null;
+        return { oldLabel: before.label, newLabel: v.label, voiceId: v.voiceId, voiceChanged };
+      })
+      .filter((c): c is NonNullable<typeof c> => !!c);
+    if (changes.length) {
+      try {
+        const r = await this.svc.applyVoiceSlotChanges(changes);
+        if (r.segs) {
+          this.toast.success(`🔁 Palette propagée : ${r.segs} segment(s) mis à jour dans ${r.soundsTouched} son(s)`
+            + (r.regen ? ` — ${r.regen} à régénérer.` : '.'));
+        }
+      } catch (e: any) { this.toast.error('❌ Propagation de la palette : ' + (e.message || e)); }
+    }
+    this.originalVoices = (this.s.voices ?? []).map((v) => ({ ...v }));
+    this.saved.set(true); setTimeout(() => this.saved.set(false), 2000);
+  }
 
   // --- palette de voix ---
   setSlotVoice(i: number, voiceId: string) {
