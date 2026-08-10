@@ -35,7 +35,8 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
       <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-3">
         <div class="flex flex-wrap items-center gap-2 mb-2">
           <input type="checkbox" [checked]="selected().has(seg.id)" (change)="toggleSelect(seg.id)"
-            title="Sélectionner ce segment pour un assemblage d'essai" class="accent-brand-500" />
+            title="Sélectionner ce segment pour un assemblage d'essai"
+            class="h-4 w-4 shrink-0 accent-brand-500 cursor-pointer appearance-auto" />
           <span class="font-mono text-xs font-semibold bg-navy-700 text-brand-300 px-2 py-0.5 rounded-md">{{ i + 1 }}</span>
           <select [ngModel]="seg.voiceId" (ngModelChange)="setVoice(seg, $event)"
             title="Voix ElevenLabs qui lit ce segment" class="text-sm border rounded px-2 py-1 min-w-52"
