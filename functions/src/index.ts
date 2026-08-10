@@ -213,7 +213,11 @@ export const assembleSound = onCall(
     let st: any = {};
     try { st = await loadSettings(); } catch { /* défauts */ }
 
-    const segments: any[] = (sound.segments ?? []).filter((s: any) => (s.textV3 || s.textPlain));
+    // segmentIds fourni → assemblage d'essai d'un sous-ensemble (n'affecte pas le MP3 final)
+    const requestedIds: string[] = Array.isArray(req.data?.segmentIds) ? req.data.segmentIds : [];
+    const isPreview = requestedIds.length > 0;
+    let segments: any[] = (sound.segments ?? []).filter((s: any) => (s.textV3 || s.textPlain));
+    if (isPreview) segments = segments.filter((s: any) => requestedIds.includes(s.id));
     if (!segments.length) throw new HttpsError('failed-precondition', 'Aucun segment dans ce son');
     if (segments.length > 200) throw new HttpsError('invalid-argument', 'Trop de segments (max 200)');
     const missing = segments.filter((s: any) => !s.audioPath || s.status !== 'generated');
@@ -231,7 +235,7 @@ export const assembleSound = onCall(
     const silBefore = clampSil(st.audioSilenceBefore, 0); // silence d'ouverture du fichier final
     const silAfter = clampSil(st.audioSilenceAfter, 0);   // silence de clôture du fichier final
 
-    await ref.update({ assemblyStatus: 'assembling', updatedAt: Date.now() });
+    if (!isPreview) await ref.update({ assemblyStatus: 'assembling', updatedAt: Date.now() });
     const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'smash-'));
     try {
       // télécharge chaque segment
@@ -261,28 +265,31 @@ export const assembleSound = onCall(
         '-c:a', 'libmp3lame', '-b:a', '128k', out]);
 
       // nom versionné (cf. generateSegment) : URL nouvelle à chaque assemblage
-      const destPath = `audio/sounds/${soundId}/final-${Date.now()}.mp3`;
+      const destPath = `audio/sounds/${soundId}/${isPreview ? 'preview' : 'final'}-${Date.now()}.mp3`;
       await bucket.upload(out, { destination: destPath, metadata: { contentType: 'audio/mpeg' } });
       const [url] = await bucket.file(destPath).getSignedUrl({ action: 'read', expires: '2491-01-01' });
-      if (sound.finalPath && sound.finalPath !== destPath) {
-        try { await bucket.file(sound.finalPath).delete(); }
-        catch (e: any) { logger.warn('assembleSound: ancien final non supprimé — ' + String(e?.message || e), { soundId }); }
+      const oldPath = isPreview ? sound.previewPath : sound.finalPath;
+      if (oldPath && oldPath !== destPath) {
+        try { await bucket.file(oldPath).delete(); }
+        catch (e: any) { logger.warn('assembleSound: ancien fichier non supprimé — ' + String(e?.message || e), { soundId, oldPath }); }
       }
       const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
       let durationSec = 0;
       try { durationSec = Math.round(parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', out]))); }
       catch (e: any) { logger.warn('assembleSound: durée non mesurée — ' + String(e?.message || e)); }
 
-      await ref.update({
-        assemblyStatus: 'done', finalUrl: url, finalPath: destPath,
-        finalDurationSec: durationSec, finalSizeMb: sizeMb, assembledAt: Date.now(),
-        updatedAt: Date.now(),
-      });
-      logger.info('assembleSound: ok', { soundId, count: files.length, sizeMb, durationSec, destPath });
+      await ref.update(isPreview
+        ? { previewPath: destPath, updatedAt: Date.now() }
+        : {
+          assemblyStatus: 'done', finalUrl: url, finalPath: destPath,
+          finalDurationSec: durationSec, finalSizeMb: sizeMb, assembledAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      logger.info('assembleSound: ok', { soundId, isPreview, count: files.length, sizeMb, durationSec, destPath });
       return { ok: true, url, count: files.length, sizeMb, durationSec };
     } catch (e: any) {
       logger.error('assembleSound: échec — ' + String(e?.message || e), { soundId, stack: e?.stack });
-      await ref.update({ assemblyStatus: 'error', updatedAt: Date.now() });
+      if (!isPreview) await ref.update({ assemblyStatus: 'error', updatedAt: Date.now() });
       throw e instanceof HttpsError ? e : new HttpsError('internal', String(e?.message || e));
     } finally {
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* tmp éphémère */ }

@@ -41,6 +41,7 @@ export interface Sound {
   finalDurationSec?: number;
   finalSizeMb?: number;
   assembledAt?: number;
+  previewPath?: string;    // dernier assemblage d'essai (sous-ensemble de segments)
 
   updatedAt?: number;
 }

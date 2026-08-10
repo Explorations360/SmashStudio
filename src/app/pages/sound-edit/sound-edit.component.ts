@@ -34,6 +34,8 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
     @for (seg of model.segments; track seg.id; let i = $index) {
       <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-3">
         <div class="flex flex-wrap items-center gap-2 mb-2">
+          <input type="checkbox" [checked]="selected().has(seg.id)" (change)="toggleSelect(seg.id)"
+            title="Sélectionner ce segment pour un assemblage d'essai" class="accent-brand-500" />
           <span class="font-mono text-xs font-semibold bg-navy-700 text-brand-300 px-2 py-0.5 rounded-md">{{ i + 1 }}</span>
           <select [ngModel]="seg.voiceId" (ngModelChange)="setVoice(seg, $event)"
             title="Voix ElevenLabs qui lit ce segment" class="text-sm border rounded px-2 py-1 min-w-52"
@@ -105,6 +107,14 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
       }
     </div>
 
+    @if (testUrl()) {
+      <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4 flex items-center gap-3">
+        <span class="text-sm text-slate-300 shrink-0">🔊 Essai ({{ testCount() }} segment(s)) :</span>
+        <audio [src]="testUrl()" controls autoplay class="w-full h-9"></audio>
+        <button (click)="testUrl.set('')" title="Fermer le lecteur d'essai" class="text-slate-400 hover:text-white leading-none">✕</button>
+      </div>
+    }
+
     <div class="flex flex-wrap gap-2 items-center">
       <button (click)="save()" [disabled]="saving()" title="Enregistrer le son" class="bg-brand-500 hover:bg-brand-400 text-white px-4 py-2 rounded-lg disabled:opacity-40">
         {{ saving() ? 'Enregistrement…' : 'Enregistrer' }}
@@ -117,6 +127,11 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
       <button (click)="assemble()" [disabled]="bulkBusy() || !allGenerated()"
         [title]="allGenerated() ? 'Assembler tous les segments en un seul MP3' : 'Génère d\\'abord tous les segments'"
         class="bg-indigo-500 hover:bg-indigo-400 text-white px-4 py-2 rounded-lg disabled:opacity-40">🔗 Assembler le MP3</button>
+      <button (click)="assembleSelection()" [disabled]="bulkBusy() || !selectedReady()"
+        [title]="selected().size ? (selectedReady() ? 'Assembler uniquement les segments cochés en un MP3 d\\'essai (le MP3 final n\\'est pas touché)' : 'Génère d\\'abord les segments cochés') : 'Coche d\\'abord des segments'"
+        class="border border-indigo-400 text-indigo-300 hover:bg-indigo-500/20 px-4 py-2 rounded-lg disabled:opacity-40">
+        🔊 Tester la sélection ({{ selected().size }})
+      </button>
       @if (!isNew) { <button (click)="remove()" title="Supprime le son et tous ses audios stockés" class="text-red-400 border border-red-300 px-4 py-2 rounded-lg">Supprimer</button> }
       <button (click)="back()" title="Revenir à la liste" class="border px-4 py-2 rounded-lg">Retour</button>
       @if (message()) { <span class="text-sm text-slate-300">{{ message() }}</span> }
@@ -298,6 +313,34 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       this.toast.success(`🎙 ${todo.length} segment(s) généré(s).`);
     } catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
     finally { this.bulkBusy.set(false); this.bulkLabel.set(''); }
+  }
+
+  // --- assemblage d'essai d'une sélection de segments ---
+  selected = signal<Set<string>>(new Set());
+  testUrl = signal('');
+  testCount = signal(0);
+
+  toggleSelect(id: string) {
+    const s = new Set(this.selected());
+    s.has(id) ? s.delete(id) : s.add(id);
+    this.selected.set(s);
+  }
+  selectedReady() {
+    const sel = this.selected();
+    return sel.size > 0 && this.model.segments.filter((s) => sel.has(s.id)).every((s) => s.status === 'generated');
+  }
+
+  async assembleSelection() {
+    this.bulkBusy.set(true); this.bulkLabel.set('🔊 Essai…'); this.testUrl.set('');
+    try {
+      const soundId = await this.persist();
+      const ids = this.model.segments.filter((s) => this.selected().has(s.id)).map((s) => s.id);
+      const res = await this.api.assembleSound(soundId, ids);
+      this.testCount.set(res.count);
+      this.testUrl.set(res.url);
+    } catch (e: any) {
+      this.toast.error('❌ Essai : ' + (e.message || e));
+    } finally { this.bulkBusy.set(false); this.bulkLabel.set(''); }
   }
 
   async assemble() {
