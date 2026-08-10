@@ -180,10 +180,11 @@ export const generateSegment = onCall(
       // nécessite roles/iam.serviceAccountTokenCreator sur le compte de service de la fonction (signBlob)
       const [url] = await file.getSignedUrl({ action: 'read', expires: '2491-01-01' });
       // un segment régénéré rend l'assemblage existant obsolète
-      await patchSegment({ status: 'generated', audioUrl: url, audioPath: path, chars: text.length, generatedAt: Date.now() });
+      const generatedAt = Date.now();
+      await patchSegment({ status: 'generated', audioUrl: url, audioPath: path, chars: text.length, generatedAt });
       if (sound.assemblyStatus === 'done') await ref.update({ assemblyStatus: 'stale', updatedAt: Date.now() });
       logger.info('generateSegment: terminé', { soundId, segmentId, path });
-      return { ok: true, url };
+      return { ok: true, url, path, generatedAt };
     } catch (e: any) {
       logger.error('generateSegment: échec — ' + String(e?.message || e), { soundId, segmentId, code: e?.code, stack: e?.stack });
       await patchSegment({ status: 'error' });

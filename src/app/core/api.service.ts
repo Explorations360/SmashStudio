@@ -21,8 +21,9 @@ export class ApiService {
     return (res.data as any)?.voices ?? [];
   }
   // Génère la voix ElevenLabs d'un segment (backend sécurisé)
-  generateSegment(soundId: string, segmentId: string) {
-    return httpsCallable(functions, 'generateSegment', { timeout: 120_000 })({ soundId, segmentId });
+  async generateSegment(soundId: string, segmentId: string): Promise<{ url: string; path: string; generatedAt: number }> {
+    const res = await httpsCallable(functions, 'generateSegment', { timeout: 120_000 })({ soundId, segmentId });
+    return res.data as any;
   }
   // Assemble tous les segments du son en un seul MP3 — peut durer plusieurs minutes
   async assembleSound(soundId: string): Promise<{ url: string; count: number; sizeMb: number; durationSec: number }> {

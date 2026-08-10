@@ -236,17 +236,22 @@ export class SoundEditComponent implements OnInit, OnDestroy {
     const s = new Set(this.genBusy()); on ? s.add(id) : s.delete(id); this.genBusy.set(s);
   }
 
+  // reporte dans le modèle local ce que la fonction a réellement écrit côté serveur
+  private applyGenerated(seg: Segment, res: { url?: string; path?: string; generatedAt?: number }) {
+    seg.status = 'generated';
+    seg.audioUrl = res.url ?? seg.audioUrl ?? null;
+    seg.audioPath = res.path ?? seg.audioPath ?? null;
+    seg.generatedAt = res.generatedAt ?? Date.now();
+    this.baseline.set(seg.id, seg.textV3 + '|' + seg.voiceId);
+  }
+
   async genOne(seg: Segment) {
     this.markGen(seg.id, true);
     try {
       const soundId = await this.persist();
       seg.status = 'generating';
-      await this.api.generateSegment(soundId, seg.id);
-      seg.status = 'generated';
-      // récupère l'URL fraîche écrite par la fonction
-      const fresh = this.svc.sounds().find((s) => s.id === soundId)?.segments.find((x) => x.id === seg.id);
-      if (fresh) Object.assign(seg, { audioUrl: fresh.audioUrl, audioPath: fresh.audioPath, generatedAt: fresh.generatedAt });
-      this.baseline.set(seg.id, seg.textV3 + '|' + seg.voiceId);
+      const res = await this.api.generateSegment(soundId, seg.id);
+      this.applyGenerated(seg, res);
     } catch (e: any) {
       seg.status = 'error';
       this.toast.error('❌ Segment : ' + (e.message || e));
@@ -262,11 +267,8 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       for (const [i, seg] of todo.entries()) {
         this.bulkLabel.set(`🎙 ${i + 1}/${todo.length}…`);
         seg.status = 'generating';
-        await this.api.generateSegment(soundId, seg.id);
-        seg.status = 'generated';
-        const fresh = this.svc.sounds().find((s) => s.id === soundId)?.segments.find((x) => x.id === seg.id);
-        if (fresh) Object.assign(seg, { audioUrl: fresh.audioUrl, audioPath: fresh.audioPath, generatedAt: fresh.generatedAt });
-        this.baseline.set(seg.id, seg.textV3 + '|' + seg.voiceId);
+        const res = await this.api.generateSegment(soundId, seg.id);
+        this.applyGenerated(seg, res);
       }
       this.toast.success(`🎙 ${todo.length} segment(s) généré(s).`);
     } catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }

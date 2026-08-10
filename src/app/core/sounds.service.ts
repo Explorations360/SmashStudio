@@ -6,6 +6,19 @@ import {
 import { db } from './firebase';
 import { Sound, Settings, DEFAULT_SETTINGS } from './models';
 
+// Firestore refuse `undefined` : on nettoie récursivement avant toute écriture
+function stripUndefined<T>(v: T): T {
+  if (Array.isArray(v)) return v.map(stripUndefined) as unknown as T;
+  if (v && typeof v === 'object') {
+    return Object.fromEntries(
+      Object.entries(v as Record<string, unknown>)
+        .filter(([, x]) => x !== undefined)
+        .map(([k, x]) => [k, stripUndefined(x)])
+    ) as T;
+  }
+  return v;
+}
+
 @Injectable({ providedIn: 'root' })
 export class SoundsService {
   readonly sounds = signal<Sound[]>([]);
@@ -21,8 +34,8 @@ export class SoundsService {
   }
   stop() { this.unsub?.(); this.unsub = undefined; this.sounds.set([]); }
 
-  create(sound: Sound) { return addDoc(collection(db, 'sounds'), { ...sound, updatedAt: Date.now() }); }
-  update(id: string, patch: Partial<Sound>) { return updateDoc(doc(db, 'sounds', id), { ...patch, updatedAt: Date.now() }); }
+  create(sound: Sound) { return addDoc(collection(db, 'sounds'), stripUndefined({ ...sound, updatedAt: Date.now() })); }
+  update(id: string, patch: Partial<Sound>) { return updateDoc(doc(db, 'sounds', id), stripUndefined({ ...patch, updatedAt: Date.now() })); }
   remove(id: string) { return deleteDoc(doc(db, 'sounds', id)); }
 
   // réglages partagés par toute l'équipe (doc unique 'global')
