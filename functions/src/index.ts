@@ -174,13 +174,19 @@ export const generateSegment = onCall(
       const buf = Buffer.from(await resp.arrayBuffer());
       logger.info('generateSegment: audio reçu', { soundId, segmentId, bytes: buf.length });
 
-      const path = `audio/sounds/${soundId}/${segmentId}.mp3`;
+      // nom versionné : l'URL change à chaque génération, sinon le navigateur
+      // ressert l'ancien audio depuis son cache (même chemin → même URL signée)
+      const generatedAt = Date.now();
+      const path = `audio/sounds/${soundId}/${segmentId}-${generatedAt}.mp3`;
       const file = bucket.file(path);
       await file.save(buf, { metadata: { contentType: 'audio/mpeg' } });
       // nécessite roles/iam.serviceAccountTokenCreator sur le compte de service de la fonction (signBlob)
       const [url] = await file.getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      if (seg.audioPath && seg.audioPath !== path) {
+        try { await bucket.file(seg.audioPath).delete(); }
+        catch (e: any) { logger.warn('generateSegment: ancien fichier non supprimé — ' + String(e?.message || e), { soundId, segmentId }); }
+      }
       // un segment régénéré rend l'assemblage existant obsolète
-      const generatedAt = Date.now();
       await patchSegment({ status: 'generated', audioUrl: url, audioPath: path, chars: text.length, generatedAt });
       if (sound.assemblyStatus === 'done') await ref.update({ assemblyStatus: 'stale', updatedAt: Date.now() });
       logger.info('generateSegment: terminé', { soundId, segmentId, path });
@@ -254,9 +260,14 @@ export const assembleSound = onCall(
       await runFfmpeg(['-y', ...inputs, '-filter_complex', fl, '-map', '[out]',
         '-c:a', 'libmp3lame', '-b:a', '128k', out]);
 
-      const destPath = `audio/sounds/${soundId}/final.mp3`;
+      // nom versionné (cf. generateSegment) : URL nouvelle à chaque assemblage
+      const destPath = `audio/sounds/${soundId}/final-${Date.now()}.mp3`;
       await bucket.upload(out, { destination: destPath, metadata: { contentType: 'audio/mpeg' } });
       const [url] = await bucket.file(destPath).getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      if (sound.finalPath && sound.finalPath !== destPath) {
+        try { await bucket.file(sound.finalPath).delete(); }
+        catch (e: any) { logger.warn('assembleSound: ancien final non supprimé — ' + String(e?.message || e), { soundId }); }
+      }
       const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
       let durationSec = 0;
       try { durationSec = Math.round(parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', out]))); }
