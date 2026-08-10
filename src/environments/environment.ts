@@ -5,12 +5,12 @@
 export const environment = {
   production: false,
   firebase: {
-    apiKey: "REMPLACE_MOI",
-    authDomain: "smash-studio.firebaseapp.com",
-    projectId: "smash-studio",
-    storageBucket: "smash-studio.firebasestorage.app",
-    messagingSenderId: "REMPLACE_MOI",
-    appId: "REMPLACE_MOI"
+   apiKey: "AIzaSyBvgMuToAvkHquVR755L6hkEcSKZIWFUTk",
+  authDomain: "smash-studio-b9bc8.firebaseapp.com",
+  projectId: "smash-studio-b9bc8",
+  storageBucket: "smash-studio-b9bc8.firebasestorage.app",
+  messagingSenderId: "855550837389",
+  appId: "1:855550837389:web:ff173bedbc2152ef6cd8c4"
   },
   // Région des Cloud Functions (doit correspondre à celle déployée)
   functionsRegion: 'europe-west1',
