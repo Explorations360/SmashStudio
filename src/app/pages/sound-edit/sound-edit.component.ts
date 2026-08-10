@@ -108,6 +108,20 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
       }
     </div>
 
+    @if (model.finalUrl) {
+      <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4 flex items-center gap-3">
+        <span class="text-sm text-slate-300 shrink-0">🎧 MP3 final
+          @if (model.assemblyStatus === 'stale') { <span class="text-amber-400 text-xs">(à réassembler)</span> }
+        </span>
+        <audio [src]="model.finalUrl" controls class="w-full h-9"></audio>
+        <button (click)="downloadFinal()" [disabled]="downloadingFinal()"
+          title="Télécharger le MP3 final (nom du fichier = titre du son)"
+          class="text-sm border rounded-lg px-3 py-1.5 hover:bg-white/10 disabled:opacity-40 shrink-0">
+          {{ downloadingFinal() ? '…' : '⬇ Télécharger' }}
+        </button>
+      </div>
+    }
+
     @if (testUrl()) {
       <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4 flex items-center gap-3">
         <span class="text-sm text-slate-300 shrink-0">🔊 Essai ({{ testCount() }} segment(s)) :</span>
@@ -350,6 +364,7 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       const soundId = await this.persist();
       const res = await this.api.assembleSound(soundId);
       this.model.assemblyStatus = 'done';
+      this.model.finalUrl = res.url;
       this.toast.success(`🔗 MP3 assemblé : ${Math.floor(res.durationSec / 60)}:${String(res.durationSec % 60).padStart(2, '0')} · ${res.sizeMb} Mo`, res.url);
     } catch (e: any) {
       this.model.assemblyStatus = 'error';
@@ -369,6 +384,25 @@ export class SoundEditComponent implements OnInit, OnDestroy {
     }
     catch (e: any) { this.toast.error('❌ Balisage : ' + (e.message || e)); }
     finally { const n = new Set(this.tagBusy()); n.delete(seg.id); this.tagBusy.set(n); }
+  }
+
+  // téléchargement du MP3 final avec le titre du son comme nom de fichier
+  downloadingFinal = signal(false);
+  async downloadFinal() {
+    if (!this.model.finalUrl) return;
+    this.downloadingFinal.set(true);
+    try {
+      const resp = await fetch(this.model.finalUrl);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (this.model.title || this.model.id || 'son').replace(/[\\/:*?"<>|]+/g, '-') + '.mp3';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      window.open(this.model.finalUrl, '_blank');
+    } finally { this.downloadingFinal.set(false); }
   }
 
   // pré-écoute d'un segment
