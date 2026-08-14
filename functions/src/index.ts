@@ -312,8 +312,11 @@ export const setImage = onCall(
 );
 
 /** 2bis) Génère un MP4 : image fixe (son ou projet) + MP3 assemblé du son. */
+// /tmp est un disque en RAM sur Cloud Run : le MP4 produit y réside entièrement
+// (≈ 1 Go pour 15 min à 8 Mb/s). D'où la mémoire large et une seule requête par
+// instance — sinon deux encodages simultanés font exploser la limite.
 export const generateVideo = onCall(
-  { region: REGION, timeoutSeconds: 540, memory: '2GiB' },
+  { region: REGION, timeoutSeconds: 540, memory: '8GiB', cpu: 2, concurrency: 1 },
   async (req) => {
     logger.info('generateVideo: appel', { uid: req.auth?.uid, data: req.data });
     const uid = req.auth?.uid;
@@ -349,14 +352,18 @@ export const generateVideo = onCall(
       await bucket.file(imagePath).download({ destination: img });
       await bucket.file(sound.finalPath).download({ destination: audio });
 
-      logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate });
+      logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate, durationSec: sound.finalDurationSec ?? null });
+      // -threads 2 borne la mémoire de x264 (buffers de trames par thread)
       await runFfmpeg(['-y', '-loop', '1', '-framerate', String(fps), '-i', img, '-i', audio,
         '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`,
-        '-c:v', 'libx264', '-preset', 'medium', '-tune', 'stillimage',
+        '-c:v', 'libx264', '-preset', 'medium', '-tune', 'stillimage', '-threads', '2',
         '-b:v', vBitrate + 'k', '-maxrate', vBitrate + 'k', '-bufsize', (vBitrate * 2) + 'k',
         '-g', String(fps * 2),
         '-c:a', 'aac', '-b:a', aBitrate + 'k',
         '-shortest', '-movflags', '+faststart', out]);
+
+      // libère la RAM des sources (/tmp = tmpfs) avant l'envoi
+      for (const f of [img, audio]) { try { fs.rmSync(f, { force: true }); } catch { /* déjà parti */ } }
 
       const destPath = `video/sounds/${soundId}/video-${Date.now()}.mp4`;
       await bucket.upload(out, { destination: destPath, metadata: { contentType: 'video/mp4' } });
@@ -387,7 +394,7 @@ export const generateVideo = onCall(
 
 /** 2) Assemble les segments d'un son (dans l'ordre) en UN SEUL fichier MP3. */
 export const assembleSound = onCall(
-  { region: REGION, secrets: [], timeoutSeconds: 300, memory: '1GiB' },
+  { region: REGION, secrets: [], timeoutSeconds: 300, memory: '2GiB', concurrency: 1 },
   async (req) => {
     logger.info('assembleSound: appel', { uid: req.auth?.uid, data: req.data });
     const uid = req.auth?.uid;
