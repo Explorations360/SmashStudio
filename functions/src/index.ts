@@ -248,6 +248,11 @@ export const assembleSound = onCall(
 
       // concat via filter_complex : pause (apad) après chaque segment sauf le dernier,
       // silence d'ouverture (adelay) sur le premier, silence de clôture sur le dernier
+      logger.info('assembleSound: pauses appliquées', {
+        soundId, gapDefault, silBefore, silAfter,
+        gaps: segments.map((s: any, i: number) =>
+          i < segments.length - 1 ? clampSil(s.silenceAfter, gapDefault) : silAfter),
+      });
       const out = nodePath.join(tmp, 'final.mp3');
       const inputs = files.flatMap((f) => ['-i', f]);
       let fl = '';
@@ -278,15 +283,18 @@ export const assembleSound = onCall(
       try { durationSec = Math.round(parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', out]))); }
       catch (e: any) { logger.warn('assembleSound: durée non mesurée — ' + String(e?.message || e)); }
 
+      // numéro de version incrémenté à chaque assemblage complet (intégré au nom de téléchargement)
+      const version = isPreview ? undefined : (Number(sound.finalVersion) || 0) + 1;
       await ref.update(isPreview
         ? { previewPath: destPath, updatedAt: Date.now() }
         : {
           assemblyStatus: 'done', finalUrl: url, finalPath: destPath,
           finalDurationSec: durationSec, finalSizeMb: sizeMb, assembledAt: Date.now(),
+          finalVersion: version,
           updatedAt: Date.now(),
         });
-      logger.info('assembleSound: ok', { soundId, isPreview, count: files.length, sizeMb, durationSec, destPath });
-      return { ok: true, url, count: files.length, sizeMb, durationSec };
+      logger.info('assembleSound: ok', { soundId, isPreview, version: version ?? null, count: files.length, sizeMb, durationSec, destPath });
+      return { ok: true, url, count: files.length, sizeMb, durationSec, version };
     } catch (e: any) {
       logger.error('assembleSound: échec — ' + String(e?.message || e), { soundId, stack: e?.stack });
       if (!isPreview) await ref.update({ assemblyStatus: 'error', updatedAt: Date.now() });

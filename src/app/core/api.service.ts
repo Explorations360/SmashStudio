@@ -27,7 +27,7 @@ export class ApiService {
   }
   // Assemble les segments du son en un seul MP3 — peut durer plusieurs minutes.
   // segmentIds fourni → assemblage d'essai de ce sous-ensemble (le MP3 final n'est pas touché).
-  async assembleSound(soundId: string, segmentIds?: string[]): Promise<{ url: string; count: number; sizeMb: number; durationSec: number }> {
+  async assembleSound(soundId: string, segmentIds?: string[]): Promise<{ url: string; count: number; sizeMb: number; durationSec: number; version?: number }> {
     const call = httpsCallable(functions, 'assembleSound', { timeout: 300_000 });
     const res = await call({ soundId, ...(segmentIds?.length ? { segmentIds } : {}) });
     return res.data as any;

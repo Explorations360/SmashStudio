@@ -27,10 +27,19 @@ export interface Segment {
   generatedAt?: number | null;
 }
 
+/** Un projet (podcast) regroupe une liste de sons. */
+export interface Project {
+  id?: string;
+  name: string;            // ex: "Le Gouessant Infos 146"
+  createdAt: number;
+  updatedAt?: number;
+}
+
 /** Un son final = une suite ordonnée de segments assemblés en un seul MP3. */
 export interface Sound {
   id?: string;             // id Firestore
   ownerUid: string;
+  projectId?: string | null; // projet auquel le son appartient (null = sans projet)
   title: string;           // ex: "1. Intro — Le Gouessant Infos 146"
   order: number;
   segments: Segment[];
@@ -40,6 +49,7 @@ export interface Sound {
   finalPath?: string;      // chemin Storage
   finalDurationSec?: number;
   finalSizeMb?: number;
+  finalVersion?: number;   // n° de version, incrémenté à chaque assemblage complet
   assembledAt?: number;
   previewPath?: string;    // dernier assemblage d'essai (sous-ensemble de segments)
 

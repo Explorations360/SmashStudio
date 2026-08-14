@@ -23,8 +23,15 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
     </div>
 
     <div class="grid grid-cols-4 gap-3 bg-navy-800 border border-white/10 p-5 rounded-2xl shadow-xl mb-4">
-      <label class="text-sm col-span-3">Titre
+      <label class="text-sm col-span-2">Titre
         <input [(ngModel)]="model.title" class="w-full border rounded px-2 py-1 mt-1" placeholder="1. Intro — Le Gouessant Infos 146" />
+      </label>
+      <label class="text-sm">Projet
+        <select [ngModel]="model.projectId ?? ''" (ngModelChange)="model.projectId = $event || null"
+          title="Projet (podcast) auquel appartient ce son" class="w-full border rounded px-2 py-1 mt-1">
+          <option value="">— sans projet —</option>
+          @for (p of svc.projects(); track p.id) { <option [value]="p.id">{{ p.name }}</option> }
+        </select>
       </label>
       <label class="text-sm">Ordre
         <input [(ngModel)]="model.order" type="number" class="w-full border rounded px-2 py-1 mt-1" />
@@ -111,6 +118,7 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
     @if (model.finalUrl) {
       <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4 flex items-center gap-3">
         <span class="text-sm text-slate-300 shrink-0">🎧 MP3 final
+          @if (model.finalVersion) { <span class="text-xs bg-white/10 px-1.5 py-0.5 rounded-full" title="Version de l'assemblage, incrémentée à chaque « Assembler »">v{{ model.finalVersion }}</span> }
           @if (model.assemblyStatus === 'stale') { <span class="text-amber-400 text-xs">(à réassembler)</span> }
         </span>
         <audio [src]="model.finalUrl" controls class="w-full h-9"></audio>
@@ -154,7 +162,7 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
   </div>`,
 })
 export class SoundEditComponent implements OnInit, OnDestroy {
-  private svc = inject(SoundsService);
+  svc = inject(SoundsService);
   private api = inject(ApiService);
   private auth = inject(AuthService);
   private confirmDlg = inject(ConfirmService);
@@ -178,6 +186,7 @@ export class SoundEditComponent implements OnInit, OnDestroy {
   private blank(): Sound {
     return {
       ownerUid: this.auth.uid ?? '', title: '', order: (this.svc.sounds().length + 1),
+      projectId: this.route.snapshot.queryParamMap.get('project') || null,
       segments: [], assemblyStatus: 'none',
     };
   }
@@ -365,6 +374,7 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       const res = await this.api.assembleSound(soundId);
       this.model.assemblyStatus = 'done';
       this.model.finalUrl = res.url;
+      if (res.version) this.model.finalVersion = res.version;
       this.toast.success(`🔗 MP3 assemblé : ${Math.floor(res.durationSec / 60)}:${String(res.durationSec % 60).padStart(2, '0')} · ${res.sizeMb} Mo`, res.url);
     } catch (e: any) {
       this.model.assemblyStatus = 'error';
@@ -397,7 +407,8 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       const blob = await resp.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = (this.model.title || this.model.id || 'son').replace(/[\\/:*?"<>|]+/g, '-') + '.mp3';
+      a.download = (this.model.title || this.model.id || 'son').replace(/[\\/:*?"<>|]+/g, '-')
+        + (this.model.finalVersion ? ' - v' + this.model.finalVersion : '') + '.mp3';
       a.click();
       URL.revokeObjectURL(a.href);
     } catch {

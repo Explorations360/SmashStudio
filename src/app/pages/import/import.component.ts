@@ -21,8 +21,17 @@ interface ImportFile { name: string; title: string; rows: ImportRow[]; skipUnass
     palette des Réglages par leur libellé (ex. « Voix femme principale »).
   </p>
 
-  <input type="file" accept=".csv" multiple (change)="onFiles($event)"
-    class="mb-4 text-sm file:bg-brand-500 file:text-white file:border-0 file:rounded-lg file:px-3 file:py-1.5 file:mr-3" />
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <input type="file" accept=".csv" multiple (change)="onFiles($event)"
+      class="text-sm file:bg-brand-500 file:text-white file:border-0 file:rounded-lg file:px-3 file:py-1.5 file:mr-3" />
+    <label class="text-sm flex items-center gap-2">Projet cible
+      <select [(ngModel)]="targetProjectId" title="Les sons importés seront rangés dans ce projet"
+        class="border rounded-lg px-2 py-1.5 bg-navy-800">
+        <option value="">— sans projet —</option>
+        @for (p of svc.projects(); track p.id) { <option [value]="p.id">{{ p.name }}</option> }
+      </select>
+    </label>
+  </div>
 
   @if (paletteEmpty()) {
     <p class="text-sm text-amber-400 mb-4">⚠ Aucune voix configurée dans la palette (Réglages) : les segments seront importés sans voix assignée.</p>
@@ -79,8 +88,9 @@ interface ImportFile { name: string; title: string; rows: ImportRow[]; skipUnass
   }`,
 })
 export class ImportComponent implements OnInit {
-  private svc = inject(SoundsService);
+  svc = inject(SoundsService);
   private auth = inject(AuthService);
+  targetProjectId = '';
   private toast = inject(ToastService);
   private router = inject(Router);
 
@@ -185,6 +195,7 @@ export class ImportComponent implements OnInit {
         }));
         await this.svc.create({
           ownerUid: this.auth.uid ?? '', title: f.title, order: baseOrder + i + 1,
+          projectId: this.targetProjectId || null,
           segments, assemblyStatus: 'none',
         });
         created++;

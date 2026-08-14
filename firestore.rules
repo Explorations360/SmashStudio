@@ -31,6 +31,12 @@ service cloud.firestore {
       allow create, update, delete: if isEditor();
     }
 
+    // projets (podcasts) : regroupent les sons
+    match /projects/{id} {
+      allow read: if isApproved();
+      allow create, update, delete: if isEditor();
+    }
+
     // réglages partagés (doc unique 'global')
     match /settings/{docId} {
       allow read: if isEditor();

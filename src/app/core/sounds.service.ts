@@ -1,10 +1,10 @@
 import { Injectable, signal } from '@angular/core';
 import {
   collection, query, orderBy, onSnapshot, addDoc, updateDoc, deleteDoc,
-  doc, setDoc, getDoc,
+  doc, setDoc, getDoc, writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { Sound, Settings, DEFAULT_SETTINGS } from './models';
+import { Sound, Project, Settings, DEFAULT_SETTINGS } from './models';
 
 // Firestore refuse `undefined` : on nettoie récursivement avant toute écriture
 function stripUndefined<T>(v: T): T {
@@ -22,7 +22,9 @@ function stripUndefined<T>(v: T): T {
 @Injectable({ providedIn: 'root' })
 export class SoundsService {
   readonly sounds = signal<Sound[]>([]);
+  readonly projects = signal<Project[]>([]);
   private unsub?: () => void;
+  private unsubProjects?: () => void;
 
   // espace de travail partagé : tous les comptes approuvés voient les mêmes sons
   listen() {
@@ -31,8 +33,32 @@ export class SoundsService {
     this.unsub = onSnapshot(q, (snap) => {
       this.sounds.set(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Sound) })));
     });
+    this.unsubProjects?.();
+    const qp = query(collection(db, 'projects'), orderBy('name', 'asc'));
+    this.unsubProjects = onSnapshot(qp, (snap) => {
+      this.projects.set(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Project) })));
+    });
   }
-  stop() { this.unsub?.(); this.unsub = undefined; this.sounds.set([]); }
+  stop() {
+    this.unsub?.(); this.unsub = undefined; this.sounds.set([]);
+    this.unsubProjects?.(); this.unsubProjects = undefined; this.projects.set([]);
+  }
+
+  // --- projets (un projet = un podcast = une liste de sons) ---
+  createProject(name: string) {
+    return addDoc(collection(db, 'projects'), { name: name.trim(), createdAt: Date.now(), updatedAt: Date.now() });
+  }
+  renameProject(id: string, name: string) {
+    return updateDoc(doc(db, 'projects', id), { name: name.trim(), updatedAt: Date.now() });
+  }
+  /** Supprime le projet ; ses sons sont conservés et repassent « sans projet ». */
+  async removeProject(id: string) {
+    const batch = writeBatch(db);
+    this.sounds().filter((s) => s.projectId === id && s.id)
+      .forEach((s) => batch.update(doc(db, 'sounds', s.id!), { projectId: null, updatedAt: Date.now() }));
+    batch.delete(doc(db, 'projects', id));
+    await batch.commit();
+  }
 
   create(sound: Sound) { return addDoc(collection(db, 'sounds'), stripUndefined({ ...sound, updatedAt: Date.now() })); }
   update(id: string, patch: Partial<Sound>) { return updateDoc(doc(db, 'sounds', id), stripUndefined({ ...patch, updatedAt: Date.now() })); }

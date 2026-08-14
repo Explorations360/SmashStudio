@@ -1,4 +1,4 @@
-import { Component, inject, OnDestroy, signal } from '@angular/core';
+import { Component, computed, inject, OnDestroy, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { SoundsService } from '../../core/sounds.service';
@@ -6,17 +6,45 @@ import { ApiService } from '../../core/api.service';
 import { AuthService } from '../../core/auth.service';
 import { ConfirmService } from '../../core/confirm.service';
 import { ToastService } from '../../core/toast.service';
-import { Sound } from '../../core/models';
+import { Sound, Project } from '../../core/models';
 
 @Component({
   selector: 'app-sounds',
   standalone: true,
   imports: [RouterLink, FormsModule],
   template: `
-  <div class="flex items-center gap-3 mb-4">
-    <h1 class="text-xl font-bold">Sons ({{ sounds().length }})</h1>
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <h1 class="text-xl font-bold">Sons ({{ visible().length }})</h1>
+
+    <span class="flex items-center gap-1.5">
+      <select [ngModel]="projectFilter()" (ngModelChange)="setProjectFilter($event)"
+        title="Projet (podcast) affiché" class="text-sm border rounded-lg px-2 py-1.5 bg-navy-800">
+        <option value="all">📁 Tous les projets</option>
+        <option value="none">Sans projet</option>
+        @for (p of projects(); track p.id) { <option [value]="p.id">{{ p.name }} ({{ countIn(p.id!) }})</option> }
+      </select>
+      @if (auth.canEdit()) {
+        <button (click)="startNewProject()" title="Créer un projet (podcast)" class="text-sm border rounded-lg px-2 py-1.5 hover:bg-white/10">➕ Projet</button>
+        @if (currentProject(); as cp) {
+          <button (click)="startRename(cp)" title="Renommer ce projet" class="text-sm border rounded-lg px-2 py-1.5 hover:bg-white/10">✎</button>
+          <button (click)="deleteProject(cp)" title="Supprimer ce projet (les sons sont conservés et repassent « sans projet »)"
+            class="text-sm text-red-400 border border-red-300 rounded-lg px-2 py-1.5 hover:bg-red-500/10">🗑</button>
+        }
+      }
+    </span>
+
+    @if (editingProject() !== null) {
+      <span class="flex items-center gap-1.5">
+        <input [(ngModel)]="projectNameDraft" (keydown.enter)="confirmProjectEdit()" (keydown.escape)="cancelProjectEdit()"
+          placeholder="Nom du projet (ex. Le Gouessant Infos 146)" class="text-sm border rounded-lg px-2 py-1.5 w-64" autofocus />
+        <button (click)="confirmProjectEdit()" class="text-sm bg-brand-500 hover:bg-brand-400 text-white rounded-lg px-3 py-1.5">OK</button>
+        <button (click)="cancelProjectEdit()" class="text-sm text-slate-400 hover:text-white">annuler</button>
+      </span>
+    }
+
     @if (auth.canEdit()) {
-      <a routerLink="/sounds/new" title="Créer un nouveau son" class="ml-auto bg-brand-500 hover:bg-brand-400 text-white px-3 py-1.5 rounded-lg text-sm">+ Nouveau son</a>
+      <a routerLink="/sounds/new" [queryParams]="newSoundParams()" title="Créer un nouveau son dans le projet affiché"
+        class="ml-auto bg-brand-500 hover:bg-brand-400 text-white px-3 py-1.5 rounded-lg text-sm">+ Nouveau son</a>
     }
   </div>
 
@@ -29,10 +57,13 @@ import { Sound } from '../../core/models';
         </tr>
       </thead>
       <tbody>
-        @for (s of sounds(); track s.id) {
+        @for (s of visible(); track s.id) {
           <tr class="border-t border-white/5 odd:bg-white/[0.02] hover:bg-white/5 transition-colors">
             <td class="px-3 py-2.5 max-w-[320px]">
               <a [routerLink]="['/sounds', s.id]" class="font-medium hover:text-brand-300 block truncate" [title]="s.title">{{ s.title || '(sans titre)' }}</a>
+              @if (projectFilter() === 'all' && projectName(s.projectId)) {
+                <span class="text-xs text-slate-500">📁 {{ projectName(s.projectId) }}</span>
+              }
             </td>
             <td class="px-3 py-2.5 whitespace-nowrap">
               <span class="px-2 py-0.5 rounded text-xs"
@@ -55,9 +86,9 @@ import { Sound } from '../../core/models';
                     title="Télécharger le MP3">{{ downloading().has(s.id!) ? '…' : '⬇' }}</button>
                 }
                 @if (s.assemblyStatus === 'stale') {
-                  <span class="block text-xs text-amber-400 mt-0.5" title="Un segment a été régénéré depuis le dernier assemblage">à réassembler</span>
+                  <span class="block text-xs text-amber-400 mt-0.5" title="Un segment a été régénéré depuis le dernier assemblage">{{ s.finalVersion ? 'v' + s.finalVersion + ' · ' : '' }}à réassembler</span>
                 } @else if (s.assembledAt) {
-                  <span class="block text-xs text-slate-400 mt-0.5">{{ fmtDate(s.assembledAt) }} · {{ s.finalSizeMb }} Mo</span>
+                  <span class="block text-xs text-slate-400 mt-0.5">{{ s.finalVersion ? 'v' + s.finalVersion + ' · ' : '' }}{{ fmtDate(s.assembledAt) }} · {{ s.finalSizeMb }} Mo</span>
                 }
               }
               @else if (s.assemblyStatus === 'assembling') { <span class="text-amber-400">assemblage…</span> }
@@ -83,7 +114,7 @@ import { Sound } from '../../core/models';
           </tr>
         } @empty {
           <tr><td colspan="5" class="px-3 py-8 text-center text-slate-400">
-            Aucun son pour l'instant. @if (auth.canEdit()) { Crée le premier avec « + Nouveau son ». }
+            Aucun son dans cette vue. @if (auth.canEdit()) { Crée le premier avec « + Nouveau son » (ou change de projet). }
           </td></tr>
         }
       </tbody>
@@ -130,6 +161,59 @@ export class SoundsComponent implements OnDestroy {
   message = signal('');
 
   sounds = this.svc.sounds;
+  projects = this.svc.projects;
+
+  // --- projets ---
+  projectFilter = signal<string>(localStorage.getItem('smash.projectFilter') ?? 'all'); // 'all' | 'none' | projectId
+  setProjectFilter(v: string) { this.projectFilter.set(v); localStorage.setItem('smash.projectFilter', v); }
+  visible = computed(() => {
+    const f = this.projectFilter();
+    if (f === 'all') return this.sounds();
+    if (f === 'none') return this.sounds().filter((s) => !s.projectId);
+    return this.sounds().filter((s) => s.projectId === f);
+  });
+  countIn(projectId: string) { return this.sounds().filter((s) => s.projectId === projectId).length; }
+  currentProject() { return this.projects().find((p) => p.id === this.projectFilter()) ?? null; }
+  projectName(id?: string | null) { return this.projects().find((p) => p.id === id)?.name ?? ''; }
+  newSoundParams() { return this.currentProject() ? { project: this.projectFilter() } : {}; }
+
+  // création / renommage inline d'un projet
+  editingProject = signal<'new' | string | null>(null); // 'new' | projectId en cours de renommage
+  projectNameDraft = '';
+  startNewProject() { this.editingProject.set('new'); this.projectNameDraft = ''; }
+  startRename(p: Project) { this.editingProject.set(p.id!); this.projectNameDraft = p.name; }
+  cancelProjectEdit() { this.editingProject.set(null); }
+  async confirmProjectEdit() {
+    const name = this.projectNameDraft.trim();
+    const mode = this.editingProject();
+    if (!name || mode === null) return;
+    try {
+      if (mode === 'new') {
+        const ref = await this.svc.createProject(name);
+        this.setProjectFilter(ref.id);
+        this.toast.success('📁 Projet « ' + name + ' » créé.');
+      } else {
+        await this.svc.renameProject(mode, name);
+      }
+      this.editingProject.set(null);
+    } catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
+  }
+  async deleteProject(p: Project) {
+    const n = this.countIn(p.id!);
+    const ok = await this.confirmDlg.ask({
+      title: 'Supprimer le projet « ' + p.name + ' » ?',
+      message: n
+        ? 'Ses ' + n + ' son(s) ne seront PAS supprimés : ils repasseront dans « Sans projet ».'
+        : 'Ce projet est vide.',
+      confirmLabel: 'Supprimer', danger: true,
+    });
+    if (!ok) return;
+    try {
+      await this.svc.removeProject(p.id!);
+      this.setProjectFilter('all');
+      this.toast.success('🗑 Projet « ' + p.name + ' » supprimé' + (n ? ' — sons conservés dans « Sans projet ».' : '.'));
+    } catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
+  }
 
   genCount(s: Sound) { return s.segments.filter((x) => x.status === 'generated').length; }
   errCount(s: Sound) { return s.segments.filter((x) => x.status === 'error').length; }
@@ -198,7 +282,8 @@ export class SoundsComponent implements OnDestroy {
       const blob = await resp.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = (s.title || s.id).replace(/[\\/:*?"<>|]+/g, '-') + '.mp3';
+      a.download = (s.title || s.id).replace(/[\\/:*?"<>|]+/g, '-')
+        + (s.finalVersion ? ' - v' + s.finalVersion : '') + '.mp3';
       a.click();
       URL.revokeObjectURL(a.href);
     } catch {
