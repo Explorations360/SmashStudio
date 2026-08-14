@@ -366,12 +366,15 @@ export const generateVideo = onCall(
         catch (e: any) { logger.warn('generateVideo: ancienne vidéo non supprimée — ' + String(e?.message || e), { soundId }); }
       }
       const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
+      // version propre au MP4, incrémentée à chaque génération
+      const videoVersion = (Number(sound.videoVersion) || 0) + 1;
       await ref.update({
         videoStatus: 'done', videoUrl: url, videoPath: destPath, videoSizeMb: sizeMb,
-        videoVersion: sound.finalVersion ?? null, videoAt: Date.now(), updatedAt: Date.now(),
+        videoVersion, videoFinalVersion: sound.finalVersion ?? null,
+        videoAt: Date.now(), updatedAt: Date.now(),
       });
-      logger.info('generateVideo: ok', { soundId, destPath, sizeMb });
-      return { ok: true, url, sizeMb, width: w, height: h };
+      logger.info('generateVideo: ok', { soundId, destPath, sizeMb, videoVersion });
+      return { ok: true, url, sizeMb, width: w, height: h, version: videoVersion };
     } catch (e: any) {
       logger.error('generateVideo: échec — ' + String(e?.message || e), { soundId, stack: e?.stack });
       await ref.update({ videoStatus: 'error', updatedAt: Date.now() });
@@ -540,7 +543,7 @@ export const resetSound = onCall(
       ...(scope === 'all' ? { segments } : {}),
       assemblyStatus: 'none', finalUrl: del, finalPath: del,
       finalDurationSec: del, finalSizeMb: del, assembledAt: del,
-      ...(scope === 'all' ? { videoStatus: del, videoUrl: del, videoPath: del, videoSizeMb: del, videoAt: del, videoVersion: del } : {}),
+      ...(scope === 'all' ? { videoStatus: del, videoUrl: del, videoPath: del, videoSizeMb: del, videoAt: del, videoVersion: del, videoFinalVersion: del } : {}),
       updatedAt: Date.now(),
     });
     logger.info('resetSound: ok', { soundId, scope });

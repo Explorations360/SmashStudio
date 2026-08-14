@@ -186,6 +186,7 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
         <div class="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-white/10">
           <video [src]="model.videoUrl" controls class="h-32 rounded border border-white/10"></video>
           <span class="text-xs text-slate-400">
+            @if (model.videoVersion) { <span class="bg-white/10 px-1.5 py-0.5 rounded-full mr-1" title="Version du MP4">v{{ model.videoVersion }}</span> }
             {{ model.videoSizeMb }} Mo
             @if (model.videoStatus === 'stale') { <span class="text-amber-400">· MP3 réassemblé depuis : à régénérer</span> }
           </span>
@@ -531,8 +532,9 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       const res = await this.api.generateVideo(soundId);
       this.model.videoUrl = res.url;
       this.model.videoSizeMb = res.sizeMb;
+      this.model.videoVersion = res.version;
       this.model.videoStatus = 'done';
-      this.toast.success(`🎬 MP4 généré (${res.width}×${res.height} · ${res.sizeMb} Mo)`, res.url);
+      this.toast.success(`🎬 MP4 v${res.version} généré (${res.width}×${res.height} · ${res.sizeMb} Mo)`, res.url);
     } catch (e: any) { this.toast.error('❌ MP4 : ' + (e.message || e)); }
     finally { this.videoBusy.set(false); }
   }
@@ -547,7 +549,7 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = (this.model.title || this.model.id || 'son').replace(/[\\/:*?"<>|]+/g, '-')
-        + (this.model.finalVersion ? ' - v' + this.model.finalVersion : '') + '.mp4';
+        + (this.model.videoVersion ? ' - v' + this.model.videoVersion : '') + '.mp4';
       a.click();
       URL.revokeObjectURL(a.href);
     } catch {

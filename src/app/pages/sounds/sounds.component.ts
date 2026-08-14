@@ -107,7 +107,7 @@ import { Sound, Project } from '../../core/models';
       <thead class="bg-navy-900/80 text-left sticky top-0 backdrop-blur">
         <tr class="text-xs uppercase tracking-wider text-slate-400">
           <th class="px-3 py-3">Titre</th><th class="px-3 py-3">Segments</th><th class="px-3 py-3">Voix</th>
-          <th class="px-3 py-3">MP3 final</th><th class="px-3 py-3">Actions</th>
+          <th class="px-3 py-3">MP3 final</th><th class="px-3 py-3">MP4</th><th class="px-3 py-3">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -151,6 +151,27 @@ import { Sound, Project } from '../../core/models';
             </td>
             <td class="px-3 py-2.5 whitespace-nowrap">
               @if (auth.canEdit()) {
+                <button (click)="makeVideo(s)" [disabled]="videoBusy().has(s.id!) || !s.finalUrl || !hasImage(s)"
+                  [title]="!s.finalUrl ? 'Assemble d\\'abord le MP3' : !hasImage(s) ? 'Ajoute une image (sur le son ou le projet)' : 'Générer le MP4 (image fixe + MP3)'"
+                  class="text-xs bg-indigo-500 text-white px-2 py-1 rounded disabled:opacity-40">
+                  {{ videoBusy().has(s.id!) ? '…' : '🎬 MP4' }}
+                </button>
+              }
+              @if (s.videoUrl) {
+                <button (click)="downloadVideo(s)" [disabled]="downloadingVideo().has(s.id!)"
+                  class="text-xs border rounded px-1.5 py-1 ml-1 hover:bg-white/10 disabled:opacity-40"
+                  title="Télécharger le MP4">{{ downloadingVideo().has(s.id!) ? '…' : '⬇' }}</button>
+                <span class="block text-xs mt-0.5"
+                  [class.text-amber-400]="s.videoStatus === 'stale'" [class.text-slate-400]="s.videoStatus !== 'stale'">
+                  v{{ s.videoVersion }} · {{ s.videoSizeMb }} Mo
+                  @if (s.videoStatus === 'stale') { <span title="Le MP3 a été réassemblé depuis">· à régénérer</span> }
+                </span>
+              } @else if (s.videoStatus === 'generating') { <span class="text-amber-400 text-xs">encodage…</span> }
+              @else if (s.videoStatus === 'error') { <span class="text-red-400 text-xs">erreur</span> }
+              @else if (!auth.canEdit()) { <span class="text-slate-400">—</span> }
+            </td>
+            <td class="px-3 py-2.5 whitespace-nowrap">
+              @if (auth.canEdit()) {
                 <button (click)="generateAll(s)" [disabled]="busy().has(s.id!) || !s.segments.length"
                   title="Générer la voix ElevenLabs de tous les segments non générés"
                   class="text-xs bg-brand-500 text-white px-2 py-1 rounded disabled:opacity-40">🎙 Générer</button>
@@ -167,7 +188,7 @@ import { Sound, Project } from '../../core/models';
             </td>
           </tr>
         } @empty {
-          <tr><td colspan="5" class="px-3 py-8 text-center text-slate-400">
+          <tr><td colspan="6" class="px-3 py-8 text-center text-slate-400">
             Aucun son dans cette vue. @if (auth.canEdit()) { Crée le premier avec « + Nouveau son » (ou change de projet). }
           </td></tr>
         }
@@ -301,6 +322,49 @@ export class SoundsComponent implements OnDestroy {
     catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
     finally { this.introBusy.set(false); }
   }
+  // --- MP4 depuis la liste ---
+  videoBusy = signal<Set<string>>(new Set());
+  downloadingVideo = signal<Set<string>>(new Set());
+
+  /** Une image est disponible : celle du son, sinon celle de son projet. */
+  hasImage(s: Sound) {
+    return !!(s.imageUrl || this.projects().find((p) => p.id === s.projectId)?.imageUrl);
+  }
+  async makeVideo(s: Sound) {
+    if (!s.id) return;
+    this.videoBusy.update((set) => new Set(set).add(s.id!));
+    this.message.set('Encodage MP4 de « ' + s.title +' »…');
+    try {
+      const res = await this.api.generateVideo(s.id);
+      this.toast.success(`🎬 MP4 v${res.version} — « ${s.title} » (${res.width}×${res.height} · ${res.sizeMb} Mo)`, res.url);
+      this.message.set('');
+    } catch (e: any) {
+      this.toast.error('❌ MP4 : ' + (e.message || e));
+      this.message.set('');
+    } finally {
+      this.videoBusy.update((set) => { const n = new Set(set); n.delete(s.id!); return n; });
+    }
+  }
+  async downloadVideo(s: Sound) {
+    if (!s.id || !s.videoUrl) return;
+    this.downloadingVideo.update((set) => new Set(set).add(s.id!));
+    try {
+      const resp = await fetch(s.videoUrl);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (s.title || s.id).replace(/[\\/:*?"<>|]+/g, '-')
+        + (s.videoVersion ? ' - v' + s.videoVersion : '') + '.mp4';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      window.open(s.videoUrl, '_blank');
+    } finally {
+      this.downloadingVideo.update((set) => { const n = new Set(set); n.delete(s.id!); return n; });
+    }
+  }
+
   // --- image du projet (défaut des MP4) ---
   @ViewChild('imageInput') imageInput?: ElementRef<HTMLInputElement>;
   imageBusy = signal(false);

@@ -76,7 +76,8 @@ export interface Sound {
   videoUrl?: string;
   videoPath?: string;
   videoSizeMb?: number;
-  videoVersion?: number | null; // version du MP3 utilisée pour ce MP4
+  videoVersion?: number;             // n° de version du MP4, incrémenté à chaque génération
+  videoFinalVersion?: number | null; // version du MP3 utilisée pour ce MP4
   videoAt?: number;
 
   updatedAt?: number;
