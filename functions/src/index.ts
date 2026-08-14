@@ -263,6 +263,125 @@ export const setProjectIntro = onCall(
   }
 );
 
+/** 1ter) Téléverse (ou retire) l'image d'un projet (par défaut) ou d'un son (surcharge). */
+export const setImage = onCall(
+  { region: REGION, timeoutSeconds: 120, memory: '512MiB' },
+  async (req) => {
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const scope = req.data?.scope as string; // 'project' | 'sound'
+    const id = req.data?.id as string;
+    if (!['project', 'sound'].includes(scope) || !id) throw new HttpsError('invalid-argument', 'scope/id manquant');
+
+    const ref = db.collection(scope === 'project' ? 'projects' : 'sounds').doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new HttpsError('not-found', (scope === 'project' ? 'Projet' : 'Son') + ' introuvable');
+    const cur = snap.data() as any;
+
+    const del = admin.firestore.FieldValue.delete();
+    const removeOld = async () => {
+      if (!cur.imagePath) return;
+      try { await bucket.file(cur.imagePath).delete(); }
+      catch (e: any) { logger.warn('setImage: ancienne image non supprimée — ' + String(e?.message || e), { scope, id }); }
+    };
+
+    const dataBase64 = req.data?.dataBase64 as string | undefined;
+    if (!dataBase64) {
+      await removeOld();
+      await ref.update({ imageUrl: del, imagePath: del, imageName: del, updatedAt: Date.now() });
+      logger.info('setImage: image retirée', { scope, id });
+      return { ok: true, removed: true };
+    }
+
+    const name = String(req.data?.name ?? 'image.jpg').slice(0, 120);
+    const buf = Buffer.from(dataBase64, 'base64');
+    if (!buf.length) throw new HttpsError('invalid-argument', 'Fichier vide');
+    if (buf.length > 7 * 1024 * 1024) throw new HttpsError('invalid-argument', 'Image trop lourde (max 7 Mo)');
+    const ext = (name.match(/\.(jpe?g|png|webp)$/i)?.[1] ?? 'jpg').toLowerCase();
+
+    await removeOld();
+    const path = `images/${scope}s/${id}/image-${Date.now()}.${ext}`;
+    const file = bucket.file(path);
+    await file.save(buf, { metadata: { contentType: ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg' } });
+    const [url] = await file.getSignedUrl({ action: 'read', expires: '2491-01-01' });
+    await ref.update({ imageUrl: url, imagePath: path, imageName: name, updatedAt: Date.now() });
+    logger.info('setImage: ok', { scope, id, path });
+    return { ok: true, url, name };
+  }
+);
+
+/** 2bis) Génère un MP4 : image fixe (son ou projet) + MP3 assemblé du son. */
+export const generateVideo = onCall(
+  { region: REGION, timeoutSeconds: 540, memory: '2GiB' },
+  async (req) => {
+    logger.info('generateVideo: appel', { uid: req.auth?.uid, data: req.data });
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const soundId = req.data?.soundId as string;
+    if (!soundId) throw new HttpsError('invalid-argument', 'soundId manquant');
+    const { ref, sound } = await loadSound(soundId);
+    if (!sound.finalPath) throw new HttpsError('failed-precondition', 'Assemble d\'abord le MP3 de ce son');
+
+    // image : celle du son si définie, sinon celle du projet
+    let imagePath: string | undefined = sound.imagePath;
+    if (!imagePath && sound.projectId) {
+      const p = (await db.collection('projects').doc(sound.projectId).get()).data() as any;
+      imagePath = p?.imagePath;
+    }
+    if (!imagePath) throw new HttpsError('failed-precondition', 'Aucune image : ajoute-en une sur le son ou sur son projet');
+
+    let st: any = {};
+    try { st = await loadSettings(); } catch { /* défauts */ }
+    const w = Math.min(Math.max(Number(st.videoWidth) || 1920, 160), 3840);
+    const h = Math.min(Math.max(Number(st.videoHeight) || 1080, 160), 2160);
+    const vBitrate = Math.min(Math.max(Number(st.videoBitrate) || 8000, 500), 50000); // kb/s
+    const aBitrate = Math.min(Math.max(Number(st.videoAudioBitrate) || 192, 64), 320); // kb/s
+    const fps = Math.min(Math.max(Number(st.videoFps) || 25, 1), 60);
+
+    await ref.update({ videoStatus: 'generating', updatedAt: Date.now() });
+    const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'vid-'));
+    try {
+      const img = nodePath.join(tmp, 'image' + nodePath.extname(imagePath));
+      const audio = nodePath.join(tmp, 'audio.mp3');
+      const out = nodePath.join(tmp, 'video.mp4');
+      await bucket.file(imagePath).download({ destination: img });
+      await bucket.file(sound.finalPath).download({ destination: audio });
+
+      logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate });
+      await runFfmpeg(['-y', '-loop', '1', '-framerate', String(fps), '-i', img, '-i', audio,
+        '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`,
+        '-c:v', 'libx264', '-preset', 'medium', '-tune', 'stillimage',
+        '-b:v', vBitrate + 'k', '-maxrate', vBitrate + 'k', '-bufsize', (vBitrate * 2) + 'k',
+        '-g', String(fps * 2),
+        '-c:a', 'aac', '-b:a', aBitrate + 'k',
+        '-shortest', '-movflags', '+faststart', out]);
+
+      const destPath = `video/sounds/${soundId}/video-${Date.now()}.mp4`;
+      await bucket.upload(out, { destination: destPath, metadata: { contentType: 'video/mp4' } });
+      const [url] = await bucket.file(destPath).getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      if (sound.videoPath && sound.videoPath !== destPath) {
+        try { await bucket.file(sound.videoPath).delete(); }
+        catch (e: any) { logger.warn('generateVideo: ancienne vidéo non supprimée — ' + String(e?.message || e), { soundId }); }
+      }
+      const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
+      await ref.update({
+        videoStatus: 'done', videoUrl: url, videoPath: destPath, videoSizeMb: sizeMb,
+        videoVersion: sound.finalVersion ?? null, videoAt: Date.now(), updatedAt: Date.now(),
+      });
+      logger.info('generateVideo: ok', { soundId, destPath, sizeMb });
+      return { ok: true, url, sizeMb, width: w, height: h };
+    } catch (e: any) {
+      logger.error('generateVideo: échec — ' + String(e?.message || e), { soundId, stack: e?.stack });
+      await ref.update({ videoStatus: 'error', updatedAt: Date.now() });
+      throw e instanceof HttpsError ? e : new HttpsError('internal', String(e?.message || e));
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* tmp éphémère */ }
+    }
+  }
+);
+
 /** 2) Assemble les segments d'un son (dans l'ordre) en UN SEUL fichier MP3. */
 export const assembleSound = onCall(
   { region: REGION, secrets: [], timeoutSeconds: 300, memory: '1GiB' },
@@ -370,6 +489,8 @@ export const assembleSound = onCall(
           assemblyStatus: 'done', finalUrl: url, finalPath: destPath,
           finalDurationSec: durationSec, finalSizeMb: sizeMb, assembledAt: Date.now(),
           finalVersion: version,
+          // le MP4 existant ne correspond plus à ce nouvel assemblage
+          ...(sound.videoStatus === 'done' ? { videoStatus: 'stale' } : {}),
           updatedAt: Date.now(),
         });
       logger.info('assembleSound: ok', { soundId, isPreview, version: version ?? null, count: files.length, sizeMb, durationSec, destPath });
@@ -399,11 +520,13 @@ export const resetSound = onCall(
     const { ref, sound } = await loadSound(soundId);
 
     if (scope === 'all') {
-      // supprime tout le dossier du son (segments + final + orphelins de segments supprimés)
-      try {
-        await bucket.deleteFiles({ prefix: `audio/sounds/${soundId}/` });
-        logger.info('resetSound: dossier supprimé', { soundId });
-      } catch (e: any) { logger.warn('resetSound: suppression dossier échouée — ' + String(e?.message || e), { soundId }); }
+      // supprime tout le dossier du son (segments + final + orphelins de segments supprimés) et la vidéo
+      for (const prefix of [`audio/sounds/${soundId}/`, `video/sounds/${soundId}/`]) {
+        try {
+          await bucket.deleteFiles({ prefix });
+          logger.info('resetSound: dossier supprimé', { soundId, prefix });
+        } catch (e: any) { logger.warn('resetSound: suppression dossier échouée — ' + String(e?.message || e), { soundId, prefix }); }
+      }
     } else if (sound.finalPath) {
       try { await bucket.file(sound.finalPath).delete(); logger.info('resetSound: final supprimé', { soundId }); }
       catch (e: any) { logger.warn('resetSound: suppression final échouée — ' + String(e?.message || e), { soundId }); }
@@ -417,6 +540,7 @@ export const resetSound = onCall(
       ...(scope === 'all' ? { segments } : {}),
       assemblyStatus: 'none', finalUrl: del, finalPath: del,
       finalDurationSec: del, finalSizeMb: del, assembledAt: del,
+      ...(scope === 'all' ? { videoStatus: del, videoUrl: del, videoPath: del, videoSizeMb: del, videoAt: del, videoVersion: del } : {}),
       updatedAt: Date.now(),
     });
     logger.info('resetSound: ok', { soundId, scope });

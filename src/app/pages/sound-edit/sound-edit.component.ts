@@ -157,6 +157,47 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
       </div>
     }
 
+    <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="text-sm text-slate-300 shrink-0">🎬 Vidéo MP4</span>
+        @if (effectiveImage(); as im) {
+          <img [src]="im.url" class="h-12 rounded border border-white/10 object-cover" />
+          <span class="text-xs text-slate-400">{{ im.own ? 'image du son' : 'image du projet' }} · {{ im.name }}</span>
+        } @else {
+          <span class="text-xs text-amber-400">Aucune image — ajoute-en une ici ou sur le projet.</span>
+        }
+        <button (click)="imageInput.click()" [disabled]="imageBusy()" class="text-xs border rounded px-2 py-1 hover:bg-white/10 disabled:opacity-40"
+          title="Image propre à ce son (remplace celle du projet) — jpg, png, webp, max 7 Mo">
+          {{ imageBusy() ? '…' : (model.imageUrl ? 'Remplacer l\\'image' : '⬆ Image du son') }}
+        </button>
+        @if (model.imageUrl) {
+          <button (click)="removeOwnImage()" [disabled]="imageBusy()" class="text-xs text-red-400 border border-red-300 rounded px-2 py-1 disabled:opacity-40"
+            title="Retirer l'image propre à ce son (l'image du projet reprendra le dessus)">✕</button>
+        }
+        <input #imageInput type="file" accept="image/jpeg,image/png,image/webp" class="hidden" (change)="uploadOwnImage($event)" />
+
+        <button (click)="makeVideo()" [disabled]="videoBusy() || !model.finalUrl || !effectiveImage()"
+          [title]="!model.finalUrl ? 'Assemble d\\'abord le MP3' : !effectiveImage() ? 'Ajoute d\\'abord une image' : 'Générer le MP4 (image fixe + MP3)'"
+          class="ml-auto bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded-lg text-sm disabled:opacity-40">
+          {{ videoBusy() ? '🎬 Encodage…' : '🎬 Générer le MP4' }}
+        </button>
+      </div>
+      @if (model.videoUrl) {
+        <div class="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-white/10">
+          <video [src]="model.videoUrl" controls class="h-32 rounded border border-white/10"></video>
+          <span class="text-xs text-slate-400">
+            {{ model.videoSizeMb }} Mo
+            @if (model.videoStatus === 'stale') { <span class="text-amber-400">· MP3 réassemblé depuis : à régénérer</span> }
+          </span>
+          <button (click)="downloadVideo()" [disabled]="downloadingVideo()"
+            title="Télécharger le MP4 (nom = titre du son + version)"
+            class="text-sm border rounded-lg px-3 py-1.5 hover:bg-white/10 disabled:opacity-40">
+            {{ downloadingVideo() ? '…' : '⬇ Télécharger le MP4' }}
+          </button>
+        </div>
+      }
+    </div>
+
     @if (testUrl()) {
       <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4 flex items-center gap-3">
         <span class="text-sm text-slate-300 shrink-0">🔊 Essai ({{ testCount() }} segment(s)) :</span>
@@ -442,6 +483,76 @@ export class SoundEditComponent implements OnInit, OnDestroy {
     } catch {
       window.open(this.model.finalUrl, '_blank');
     } finally { this.downloadingFinal.set(false); }
+  }
+
+  // --- image du son + génération du MP4 ---
+  imageBusy = signal(false);
+  videoBusy = signal(false);
+  downloadingVideo = signal(false);
+
+  /** Image utilisée pour le MP4 : celle du son si définie, sinon celle du projet. */
+  effectiveImage(): { url: string; name: string; own: boolean } | null {
+    if (this.model.imageUrl) return { url: this.model.imageUrl, name: this.model.imageName ?? '', own: true };
+    const p = this.soundProject();
+    return p?.imageUrl ? { url: p.imageUrl, name: p.imageName ?? '', own: false } : null;
+  }
+
+  async uploadOwnImage(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (file.size > 7 * 1024 * 1024) { this.toast.error('❌ Image trop lourde (max 7 Mo)'); return; }
+    this.imageBusy.set(true);
+    try {
+      const soundId = await this.persist();
+      const res = await this.api.setImage('sound', soundId, file);
+      this.model.imageUrl = res.url;
+      this.model.imageName = res.name;
+      this.toast.success('🖼 Image du son enregistrée.');
+    } catch (e: any) { this.toast.error('❌ Image : ' + (e.message || e)); }
+    finally { this.imageBusy.set(false); }
+  }
+  async removeOwnImage() {
+    if (!this.model.id) return;
+    this.imageBusy.set(true);
+    try {
+      await this.api.setImage('sound', this.model.id);
+      this.model.imageUrl = undefined; this.model.imageName = undefined; this.model.imagePath = undefined;
+      this.toast.success('🖼 Image du son retirée.');
+    } catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
+    finally { this.imageBusy.set(false); }
+  }
+
+  async makeVideo() {
+    this.videoBusy.set(true);
+    try {
+      const soundId = await this.persist();
+      const res = await this.api.generateVideo(soundId);
+      this.model.videoUrl = res.url;
+      this.model.videoSizeMb = res.sizeMb;
+      this.model.videoStatus = 'done';
+      this.toast.success(`🎬 MP4 généré (${res.width}×${res.height} · ${res.sizeMb} Mo)`, res.url);
+    } catch (e: any) { this.toast.error('❌ MP4 : ' + (e.message || e)); }
+    finally { this.videoBusy.set(false); }
+  }
+
+  async downloadVideo() {
+    if (!this.model.videoUrl) return;
+    this.downloadingVideo.set(true);
+    try {
+      const resp = await fetch(this.model.videoUrl);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (this.model.title || this.model.id || 'son').replace(/[\\/:*?"<>|]+/g, '-')
+        + (this.model.finalVersion ? ' - v' + this.model.finalVersion : '') + '.mp4';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      window.open(this.model.videoUrl, '_blank');
+    } finally { this.downloadingVideo.set(false); }
   }
 
   // pré-écoute d'un segment

@@ -102,6 +102,30 @@ import { Settings, DEFAULT_SETTINGS, VoiceSlot } from '../../core/models';
     </section>
 
     <section class="bg-navy-800 p-5 rounded-xl shadow">
+      <h2 class="font-semibold mb-1">🎬 Vidéo (MP4)</h2>
+      <p class="text-xs text-slate-400 mb-3">Paramètres des MP4 générés (image fixe + MP3 assemblé). L'image est cadrée dans ces dimensions, sans déformation (bandes noires si besoin).</p>
+      <div class="grid grid-cols-2 gap-3 text-sm">
+        <label>Largeur (px)
+          <input [(ngModel)]="s.videoWidth" type="number" min="160" max="3840" step="2" class="w-full border rounded px-2 py-1 mt-1" />
+        </label>
+        <label>Hauteur (px)
+          <input [(ngModel)]="s.videoHeight" type="number" min="160" max="2160" step="2" class="w-full border rounded px-2 py-1 mt-1" />
+        </label>
+        <label>Débit vidéo (kb/s)
+          <input [(ngModel)]="s.videoBitrate" type="number" min="500" max="50000" step="500" class="w-full border rounded px-2 py-1 mt-1"
+            title="8000 kb/s = haute qualité en 1080p. Sur une image fixe, le fichier reste léger." />
+        </label>
+        <label>Débit audio du MP4 (kb/s)
+          <input [(ngModel)]="s.videoAudioBitrate" type="number" min="64" max="320" step="32" class="w-full border rounded px-2 py-1 mt-1" />
+        </label>
+        <label>Images / s
+          <input [(ngModel)]="s.videoFps" type="number" min="1" max="60" class="w-full border rounded px-2 py-1 mt-1"
+            title="25 convient à une image fixe ; inutile de monter plus haut." />
+        </label>
+      </div>
+    </section>
+
+    <section class="bg-navy-800 p-5 rounded-xl shadow">
       <h2 class="font-semibold mb-3">✨ Balisage IA (Claude)</h2>
       <div class="grid grid-cols-2 gap-3 text-sm">
         <label>Dynamisme

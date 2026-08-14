@@ -75,7 +75,30 @@ import { Sound, Project } from '../../core/models';
         }
       </div>
       <p class="text-xs text-slate-500 mt-2">Le jingle s'ajoute en tête des sons dont la case « Jingle d'intro » est cochée (dans l'éditeur du son).</p>
+
+      <div class="flex flex-wrap items-center gap-3 mt-4 pt-4 border-t border-white/10">
+        <span class="text-sm text-slate-300 shrink-0">🖼 Image des MP4</span>
+        @if (cp.imageUrl) {
+          <img [src]="cp.imageUrl" class="h-12 rounded border border-white/10 object-cover" />
+          <span class="text-xs text-slate-400 truncate max-w-[220px]" [title]="cp.imageName">{{ cp.imageName }}</span>
+          @if (auth.canEdit()) {
+            <button (click)="pickImage(cp)" [disabled]="imageBusy()" class="text-xs border rounded px-2 py-1 hover:bg-white/10 disabled:opacity-40"
+              title="Remplacer l'image du projet">{{ imageBusy() ? '…' : 'Remplacer' }}</button>
+            <button (click)="removeImage(cp)" [disabled]="imageBusy()" class="text-xs text-red-400 border border-red-300 rounded px-2 py-1 disabled:opacity-40"
+              title="Retirer l'image du projet">✕</button>
+          }
+        } @else {
+          <span class="text-xs text-slate-400">Aucune image pour « {{ cp.name }} ».</span>
+          @if (auth.canEdit()) {
+            <button (click)="pickImage(cp)" [disabled]="imageBusy()" class="text-xs bg-brand-500 hover:bg-brand-400 text-white rounded px-2 py-1 disabled:opacity-40"
+              title="Choisir une image (jpg, png, webp) — max 7 Mo">{{ imageBusy() ? 'Envoi…' : '⬆ Ajouter une image' }}</button>
+          }
+        }
+        <span class="text-xs text-slate-500">Image par défaut des MP4 du projet — surchargeable son par son.</span>
+      </div>
+
       <input #introInput type="file" accept="audio/*" class="hidden" (change)="uploadIntro($event)" />
+      <input #imageInput type="file" accept="image/jpeg,image/png,image/webp" class="hidden" (change)="uploadImage($event)" />
     </div>
   }
 
@@ -278,6 +301,34 @@ export class SoundsComponent implements OnDestroy {
     catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
     finally { this.introBusy.set(false); }
   }
+  // --- image du projet (défaut des MP4) ---
+  @ViewChild('imageInput') imageInput?: ElementRef<HTMLInputElement>;
+  imageBusy = signal(false);
+  private imageTarget: Project | null = null;
+
+  pickImage(p: Project) { this.imageTarget = p; this.imageInput?.nativeElement.click(); }
+  async uploadImage(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    const p = this.imageTarget;
+    input.value = '';
+    if (!file || !p?.id) return;
+    if (file.size > 7 * 1024 * 1024) { this.toast.error('❌ Image trop lourde (max 7 Mo)'); return; }
+    this.imageBusy.set(true);
+    try {
+      await this.api.setImage('project', p.id, file);
+      this.toast.success(`🖼 Image ajoutée au projet « ${p.name} ».`);
+    } catch (e: any) { this.toast.error('❌ Image : ' + (e.message || e)); }
+    finally { this.imageBusy.set(false); }
+  }
+  async removeImage(p: Project) {
+    if (!p.id) return;
+    this.imageBusy.set(true);
+    try { await this.api.setImage('project', p.id); this.toast.success('🖼 Image retirée.'); }
+    catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
+    finally { this.imageBusy.set(false); }
+  }
+
   async setIntroGap(p: Project, v: any) {
     if (!p.id) return;
     const n = v === '' || v === null ? null : Number(v);

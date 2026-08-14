@@ -37,9 +37,15 @@ export interface Project {
   introName?: string;      // nom du fichier d'origine
   introDurationSec?: number;
   introGap?: number | null; // pause après le jingle (vide = pause entre segments des Réglages)
+  // image par défaut des MP4 du projet (surchargeable son par son)
+  imageUrl?: string;
+  imagePath?: string;
+  imageName?: string;
   createdAt: number;
   updatedAt?: number;
 }
+
+export type VideoStatus = 'none' | 'generating' | 'done' | 'error' | 'stale';
 
 /** Un son final = une suite ordonnée de segments assemblés en un seul MP3. */
 export interface Sound {
@@ -62,6 +68,17 @@ export interface Sound {
   assembledAt?: number;
   previewPath?: string;    // dernier assemblage d'essai (sous-ensemble de segments)
 
+  // image propre au son (sinon celle du projet) et MP4 image fixe + MP3
+  imageUrl?: string;
+  imagePath?: string;
+  imageName?: string;
+  videoStatus?: VideoStatus;
+  videoUrl?: string;
+  videoPath?: string;
+  videoSizeMb?: number;
+  videoVersion?: number | null; // version du MP3 utilisée pour ce MP4
+  videoAt?: number;
+
   updatedAt?: number;
 }
 
@@ -81,6 +98,12 @@ export interface Settings {
   segmentGap: number;         // pause par défaut entre deux segments, en secondes (0 à 10)
   audioSilenceBefore: number; // silence au début du fichier final, en secondes (0 à 10)
   audioSilenceAfter: number;  // silence à la fin du fichier final, en secondes (0 à 10)
+  // Vidéo (MP4 = image fixe + MP3 assemblé)
+  videoWidth: number;
+  videoHeight: number;
+  videoBitrate: number;      // débit vidéo en kb/s
+  videoAudioBitrate: number; // débit audio du MP4 en kb/s
+  videoFps: number;
   // Balisage IA (Claude)
   tagDynamism: 'sobre' | 'modere' | 'expressif';
   tagMaxTags: number;      // nombre max de balises par segment
@@ -112,6 +135,11 @@ export const DEFAULT_SETTINGS: Settings = {
   segmentGap: 0.4,
   audioSilenceBefore: 0,
   audioSilenceAfter: 0,
+  videoWidth: 1920,
+  videoHeight: 1080,
+  videoBitrate: 8000,
+  videoAudioBitrate: 192,
+  videoFps: 25,
   tagDynamism: 'modere',
   tagMaxTags: 3,
   tagInstructions: '',
