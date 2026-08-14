@@ -51,6 +51,9 @@ export class SoundsService {
   renameProject(id: string, name: string) {
     return updateDoc(doc(db, 'projects', id), { name: name.trim(), updatedAt: Date.now() });
   }
+  updateProject(id: string, patch: Partial<Project>) {
+    return updateDoc(doc(db, 'projects', id), stripUndefined({ ...patch, updatedAt: Date.now() }));
+  }
   /** Supprime le projet ; ses sons sont conservés et repassent « sans projet ». */
   async removeProject(id: string) {
     const batch = writeBatch(db);

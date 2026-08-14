@@ -1,4 +1,4 @@
-import { Component, computed, inject, OnDestroy, signal } from '@angular/core';
+import { Component, computed, ElementRef, inject, OnDestroy, signal, ViewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { SoundsService } from '../../core/sounds.service';
@@ -47,6 +47,37 @@ import { Sound, Project } from '../../core/models';
         class="ml-auto bg-brand-500 hover:bg-brand-400 text-white px-3 py-1.5 rounded-lg text-sm">+ Nouveau son</a>
     }
   </div>
+
+  @if (currentProject(); as cp) {
+    <div class="bg-navy-800 border border-white/10 rounded-2xl shadow-xl p-4 mb-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="text-sm text-slate-300 shrink-0">🎵 Jingle d'intro de chapitre</span>
+        @if (cp.introUrl) {
+          <span class="text-xs text-slate-400 truncate max-w-[220px]" [title]="cp.introName">{{ cp.introName }} · {{ cp.introDurationSec }} s</span>
+          <audio [src]="cp.introUrl" controls class="h-9 flex-1 min-w-56"></audio>
+          <label class="text-xs text-slate-400 flex items-center gap-1.5">Pause après (s)
+            <input [ngModel]="cp.introGap" (ngModelChange)="setIntroGap(cp, $event)" type="number" step="0.1" min="0" max="10"
+              [placeholder]="'global'" title="Silence entre le jingle et le premier segment — vide = pause entre segments des Réglages"
+              class="border rounded px-1.5 py-0.5 w-20" />
+          </label>
+          @if (auth.canEdit()) {
+            <button (click)="pickIntro(cp)" [disabled]="introBusy()" class="text-xs border rounded px-2 py-1 hover:bg-white/10 disabled:opacity-40"
+              title="Remplacer le jingle">{{ introBusy() ? '…' : 'Remplacer' }}</button>
+            <button (click)="removeIntro(cp)" [disabled]="introBusy()" class="text-xs text-red-400 border border-red-300 rounded px-2 py-1 disabled:opacity-40"
+              title="Retirer le jingle de ce projet">✕</button>
+          }
+        } @else {
+          <span class="text-xs text-slate-400">Aucun jingle pour « {{ cp.name }} ».</span>
+          @if (auth.canEdit()) {
+            <button (click)="pickIntro(cp)" [disabled]="introBusy()" class="text-xs bg-brand-500 hover:bg-brand-400 text-white rounded px-2 py-1 disabled:opacity-40"
+              title="Choisir un fichier audio (mp3, wav, m4a…) — max 8 Mo">{{ introBusy() ? 'Envoi…' : '⬆ Ajouter un jingle' }}</button>
+          }
+        }
+      </div>
+      <p class="text-xs text-slate-500 mt-2">Le jingle s'ajoute en tête des sons dont la case « Jingle d'intro » est cochée (dans l'éditeur du son).</p>
+      <input #introInput type="file" accept="audio/*" class="hidden" (change)="uploadIntro($event)" />
+    </div>
+  }
 
   <div class="overflow-x-auto bg-navy-800 border border-white/10 rounded-2xl shadow-xl">
     <table class="w-full text-sm">
@@ -213,6 +244,45 @@ export class SoundsComponent implements OnDestroy {
       this.setProjectFilter('all');
       this.toast.success('🗑 Projet « ' + p.name + ' » supprimé' + (n ? ' — sons conservés dans « Sans projet ».' : '.'));
     } catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
+  }
+
+  // --- jingle d'intro du projet ---
+  @ViewChild('introInput') introInput?: ElementRef<HTMLInputElement>;
+  introBusy = signal(false);
+  private introTarget: Project | null = null;
+
+  pickIntro(p: Project) { this.introTarget = p; this.introInput?.nativeElement.click(); }
+  async uploadIntro(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    const p = this.introTarget;
+    input.value = '';
+    if (!file || !p?.id) return;
+    if (file.size > 8 * 1024 * 1024) { this.toast.error('❌ Fichier trop lourd (max 8 Mo)'); return; }
+    this.introBusy.set(true);
+    try {
+      const res = await this.api.setProjectIntro(p.id, file);
+      this.toast.success(`🎵 Jingle « ${res.name} » ajouté (${res.durationSec} s) au projet « ${p.name} ».`);
+    } catch (e: any) { this.toast.error('❌ Jingle : ' + (e.message || e)); }
+    finally { this.introBusy.set(false); }
+  }
+  async removeIntro(p: Project) {
+    const ok = await this.confirmDlg.ask({
+      title: 'Retirer le jingle de « ' + p.name + ' » ?',
+      message: 'Le fichier sera supprimé. Les sons qui l\'utilisent devront être réassemblés.',
+      confirmLabel: 'Retirer', danger: true,
+    });
+    if (!ok || !p.id) return;
+    this.introBusy.set(true);
+    try { await this.api.setProjectIntro(p.id); this.toast.success('🎵 Jingle retiré.'); }
+    catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
+    finally { this.introBusy.set(false); }
+  }
+  async setIntroGap(p: Project, v: any) {
+    if (!p.id) return;
+    const n = v === '' || v === null ? null : Number(v);
+    try { await this.svc.updateProject(p.id, { introGap: isFinite(n as number) ? n : null }); }
+    catch (e: any) { this.toast.error('❌ ' + (e.message || e)); }
   }
 
   genCount(s: Sound) { return s.segments.filter((x) => x.status === 'generated').length; }

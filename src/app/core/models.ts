@@ -31,6 +31,12 @@ export interface Segment {
 export interface Project {
   id?: string;
   name: string;            // ex: "Le Gouessant Infos 146"
+  // jingle d'intro de chapitre, ajoutable en tête des sons du projet
+  introUrl?: string;
+  introPath?: string;
+  introName?: string;      // nom du fichier d'origine
+  introDurationSec?: number;
+  introGap?: number | null; // pause après le jingle (vide = pause entre segments des Réglages)
   createdAt: number;
   updatedAt?: number;
 }
@@ -42,6 +48,9 @@ export interface Sound {
   projectId?: string | null; // projet auquel le son appartient (null = sans projet)
   title: string;           // ex: "1. Intro — Le Gouessant Infos 146"
   order: number;
+  useIntro?: boolean;      // ajouter le jingle d'intro du projet en tête de l'assemblage
+  silenceBefore?: number | null; // blanc au début du MP3 assemblé, en s (vide = réglage global)
+  silenceAfter?: number | null;  // blanc à la fin du MP3 assemblé, en s (vide = réglage global)
   segments: Segment[];
 
   assemblyStatus: AssemblyStatus;

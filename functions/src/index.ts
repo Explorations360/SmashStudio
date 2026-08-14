@@ -199,6 +199,70 @@ export const generateSegment = onCall(
   }
 );
 
+/** 1bis) Téléverse (ou retire) le jingle d'intro de chapitre d'un projet. */
+export const setProjectIntro = onCall(
+  { region: REGION, timeoutSeconds: 120, memory: '512MiB' },
+  async (req) => {
+    const uid = req.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Connexion requise');
+    await assertEditor(uid);
+    const projectId = req.data?.projectId as string;
+    if (!projectId) throw new HttpsError('invalid-argument', 'projectId manquant');
+    const pref = db.collection('projects').doc(projectId);
+    const psnap = await pref.get();
+    if (!psnap.exists) throw new HttpsError('not-found', 'Projet introuvable');
+    const project = psnap.data() as any;
+
+    const del = admin.firestore.FieldValue.delete();
+    const removeOld = async () => {
+      if (!project.introPath) return;
+      try { await bucket.file(project.introPath).delete(); }
+      catch (e: any) { logger.warn('setProjectIntro: ancien jingle non supprimé — ' + String(e?.message || e), { projectId }); }
+    };
+
+    // sans dataBase64 → suppression du jingle
+    const dataBase64 = req.data?.dataBase64 as string | undefined;
+    if (!dataBase64) {
+      await removeOld();
+      await pref.update({ introUrl: del, introPath: del, introName: del, introDurationSec: del, updatedAt: Date.now() });
+      logger.info('setProjectIntro: jingle retiré', { projectId });
+      return { ok: true, removed: true };
+    }
+
+    const name = String(req.data?.name ?? 'intro.mp3').slice(0, 120);
+    const buf = Buffer.from(dataBase64, 'base64');
+    if (!buf.length) throw new HttpsError('invalid-argument', 'Fichier vide');
+    if (buf.length > 8 * 1024 * 1024) throw new HttpsError('invalid-argument', 'Fichier trop lourd (max 8 Mo)');
+
+    const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'intro-'));
+    try {
+      // ré-encodage systématique : garantit un MP3 44,1 kHz stéréo concaténable avec les segments
+      const inF = nodePath.join(tmp, 'in.bin');
+      const outF = nodePath.join(tmp, 'intro.mp3');
+      fs.writeFileSync(inF, buf);
+      try {
+        await runFfmpeg(['-y', '-i', inF, '-ac', '2', '-ar', '44100', '-c:a', 'libmp3lame', '-b:a', '128k', outF]);
+      } catch (e: any) {
+        logger.error('setProjectIntro: ffmpeg a refusé le fichier — ' + String(e?.message || e), { projectId, name });
+        throw new HttpsError('invalid-argument', 'Fichier audio illisible (formats acceptés : mp3, wav, m4a, aac, ogg)');
+      }
+      let durationSec = 0;
+      try { durationSec = Math.round(parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', outF])) * 10) / 10; }
+      catch { /* facultatif */ }
+
+      await removeOld();
+      const path = `audio/projects/${projectId}/intro-${Date.now()}.mp3`;
+      await bucket.upload(outF, { destination: path, metadata: { contentType: 'audio/mpeg' } });
+      const [url] = await bucket.file(path).getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      await pref.update({ introUrl: url, introPath: path, introName: name, introDurationSec: durationSec, updatedAt: Date.now() });
+      logger.info('setProjectIntro: ok', { projectId, name, path, durationSec });
+      return { ok: true, url, name, durationSec };
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* tmp éphémère */ }
+    }
+  }
+);
+
 /** 2) Assemble les segments d'un son (dans l'ordre) en UN SEUL fichier MP3. */
 export const assembleSound = onCall(
   { region: REGION, secrets: [], timeoutSeconds: 300, memory: '1GiB' },
@@ -231,27 +295,43 @@ export const assembleSound = onCall(
       const eff = (v === null || v === undefined || v === '' || !isFinite(n)) ? fallback : n;
       return Math.min(Math.max(eff, 0), 10);
     };
-    const gapDefault = clampSil(st.segmentGap, 0.4);      // pause par défaut entre deux segments
-    const silBefore = clampSil(st.audioSilenceBefore, 0); // silence d'ouverture du fichier final
-    const silAfter = clampSil(st.audioSilenceAfter, 0);   // silence de clôture du fichier final
+    const gapDefault = clampSil(st.segmentGap, 0.4); // pause par défaut entre deux segments
+    // blancs d'ouverture / clôture : réglage du son, sinon valeur globale
+    const silBefore = clampSil(sound.silenceBefore, clampSil(st.audioSilenceBefore, 0));
+    const silAfter = clampSil(sound.silenceAfter, clampSil(st.audioSilenceAfter, 0));
+
+    // jingle d'intro du projet, si le son l'a activé (jamais sur un essai de sélection)
+    let intro: { path: string; gap: number } | null = null;
+    if (!isPreview && sound.useIntro && sound.projectId) {
+      const psnap = await db.collection('projects').doc(sound.projectId).get();
+      const p = psnap.data() as any;
+      if (p?.introPath) intro = { path: p.introPath, gap: clampSil(p.introGap, gapDefault) };
+      else logger.warn('assembleSound: intro demandée mais le projet n\'a pas de jingle', { soundId, projectId: sound.projectId });
+    }
 
     if (!isPreview) await ref.update({ assemblyStatus: 'assembling', updatedAt: Date.now() });
     const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'smash-'));
     try {
-      // télécharge chaque segment
+      // télécharge le jingle (en tête) puis chaque segment
       const files: string[] = [];
+      const gaps: number[] = []; // pause après chaque fichier
+      if (intro) {
+        const dest = nodePath.join(tmp, 'intro.mp3');
+        await bucket.file(intro.path).download({ destination: dest });
+        files.push(dest);
+        gaps.push(intro.gap);
+      }
       for (const [i, seg] of segments.entries()) {
         const dest = nodePath.join(tmp, `seg${String(i).padStart(3, '0')}.mp3`);
         await bucket.file(seg.audioPath).download({ destination: dest });
         files.push(dest);
+        gaps.push(i < segments.length - 1 ? clampSil(seg.silenceAfter, gapDefault) : silAfter);
       }
 
       // concat via filter_complex : pause (apad) après chaque segment sauf le dernier,
       // silence d'ouverture (adelay) sur le premier, silence de clôture sur le dernier
       logger.info('assembleSound: pauses appliquées', {
-        soundId, gapDefault, silBefore, silAfter,
-        gaps: segments.map((s: any, i: number) =>
-          i < segments.length - 1 ? clampSil(s.silenceAfter, gapDefault) : silAfter),
+        soundId, gapDefault, silBefore, silAfter, intro: intro ? { gap: intro.gap } : null, gaps,
       });
       const out = nodePath.join(tmp, 'final.mp3');
       const inputs = files.flatMap((f) => ['-i', f]);
@@ -260,8 +340,7 @@ export const assembleSound = onCall(
       for (let i = 0; i < files.length; i++) {
         const filters: string[] = ['aformat=sample_rates=44100:channel_layouts=stereo'];
         if (i === 0 && silBefore > 0) filters.push(`adelay=delays=${Math.round(silBefore * 1000)}:all=1`);
-        const gap = i < files.length - 1 ? clampSil(segments[i].silenceAfter, gapDefault) : silAfter;
-        if (gap > 0) filters.push(`apad=pad_dur=${gap}`);
+        if (gaps[i] > 0) filters.push(`apad=pad_dur=${gaps[i]}`);
         fl += `[${i}:a]${filters.join(',')}[a${i}];`;
         labels.push(`[a${i}]`);
       }

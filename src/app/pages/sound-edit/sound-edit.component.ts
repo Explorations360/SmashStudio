@@ -36,6 +36,33 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
       <label class="text-sm">Ordre
         <input [(ngModel)]="model.order" type="number" class="w-full border rounded px-2 py-1 mt-1" />
       </label>
+      <label class="text-sm">Blanc au début (s)
+        <input [(ngModel)]="model.silenceBefore" type="number" step="0.1" min="0" max="10"
+          [placeholder]="'global : ' + settings.audioSilenceBefore"
+          title="Silence ajouté au tout début du MP3 assemblé (avant le jingle) — vide = réglage global"
+          class="w-full border rounded px-2 py-1 mt-1" />
+      </label>
+      <label class="text-sm">Blanc à la fin (s)
+        <input [(ngModel)]="model.silenceAfter" type="number" step="0.1" min="0" max="10"
+          [placeholder]="'global : ' + settings.audioSilenceAfter"
+          title="Silence ajouté à la toute fin du MP3 assemblé — vide = réglage global"
+          class="w-full border rounded px-2 py-1 mt-1" />
+      </label>
+      <label class="text-sm col-span-4 flex items-center gap-2"
+        [title]="soundProject()?.introUrl ? 'Le jingle du projet sera ajouté en tête du MP3 assemblé' : 'Ce projet n\\'a pas de jingle — ajoute-le depuis la page Sons'">
+        <input type="checkbox" [(ngModel)]="model.useIntro" [disabled]="!soundProject()?.introUrl"
+          class="h-4 w-4 accent-brand-500 disabled:opacity-40" />
+        <span [class.text-slate-500]="!soundProject()?.introUrl">
+          🎵 Ajouter le jingle d'intro de chapitre en tête
+          @if (soundProject()?.introUrl) {
+            <span class="text-xs text-slate-400">({{ soundProject()?.introName }} · {{ soundProject()?.introDurationSec }} s)</span>
+          } @else if (model.projectId) {
+            <span class="text-xs text-amber-400">— aucun jingle sur ce projet</span>
+          } @else {
+            <span class="text-xs text-slate-500">— choisis d'abord un projet</span>
+          }
+        </span>
+      </label>
     </div>
 
     @for (seg of model.segments; track seg.id; let i = $index) {
@@ -209,6 +236,7 @@ export class SoundEditComponent implements OnInit, OnDestroy {
   }
 
   palette() { return (this.settings.voices ?? []).filter((v) => v.voiceId); }
+  soundProject() { return this.svc.projects().find((p) => p.id === this.model.projectId) ?? null; }
 
   setVoice(seg: Segment, voiceId: string) {
     seg.voiceId = voiceId;

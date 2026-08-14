@@ -32,6 +32,19 @@ export class ApiService {
     const res = await call({ soundId, ...(segmentIds?.length ? { segmentIds } : {}) });
     return res.data as any;
   }
+  // Définit (ou retire, sans fichier) le jingle d'intro d'un projet
+  async setProjectIntro(projectId: string, file?: File): Promise<{ url?: string; name?: string; durationSec?: number; removed?: boolean }> {
+    const payload: any = { projectId };
+    if (file) {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < buf.length; i += 8192) bin += String.fromCharCode(...buf.subarray(i, i + 8192));
+      payload.dataBase64 = btoa(bin);
+      payload.name = file.name;
+    }
+    const res = await httpsCallable(functions, 'setProjectIntro', { timeout: 120_000 })(payload);
+    return res.data as any;
+  }
   // Réinitialise un son ('all' = segments + final, 'final' = fichier assemblé seul)
   resetSound(soundId: string, scope: 'all' | 'final' = 'all') {
     return httpsCallable(functions, 'resetSound')({ soundId, scope });
