@@ -115,9 +115,9 @@ import { Settings, DEFAULT_SETTINGS, VoiceSlot } from '../../core/models';
         <label>Hauteur (px)
           <input [(ngModel)]="s.videoHeight" type="number" min="160" max="2160" step="2" class="w-full border rounded px-2 py-1 mt-1" />
         </label>
-        <label>Débit vidéo (kb/s)
+        <label>Débit vidéo max (kb/s)
           <input [(ngModel)]="s.videoBitrate" type="number" min="500" max="50000" step="500" class="w-full border rounded px-2 py-1 mt-1"
-            title="8000 kb/s = haute qualité en 1080p. Sur une image fixe, le fichier reste léger." />
+            title="Plafond de débit. L'image étant fixe, l'encodage est piloté par la qualité : le fichier reste très léger et n'atteint ce plafond que sur une image très détaillée." />
         </label>
         <label>Débit audio du MP4 (kb/s)
           <input [(ngModel)]="s.videoAudioBitrate" type="number" min="64" max="320" step="32" class="w-full border rounded px-2 py-1 mt-1" />

@@ -56,7 +56,7 @@ export class ApiService {
   }
   // Génère le MP4 (image fixe + MP3 assemblé) — peut durer plusieurs minutes
   async generateVideo(soundId: string): Promise<{ url: string; sizeMb: number; width: number; height: number; version: number }> {
-    const call = httpsCallable(functions, 'generateVideo', { timeout: 540_000 });
+    const call = httpsCallable(functions, 'generateVideo', { timeout: 1_800_000 });
     const res = await call({ soundId });
     return res.data as any;
   }

@@ -324,7 +324,7 @@ export const setImage = onCall(
 // (≈ 1 Go pour 15 min à 8 Mb/s). D'où la mémoire large et une seule requête par
 // instance — sinon deux encodages simultanés font exploser la limite.
 export const generateVideo = onCall(
-  { region: REGION, timeoutSeconds: 540, memory: '8GiB', cpu: 2, concurrency: 1 },
+  { region: REGION, timeoutSeconds: 1800, memory: '4GiB', cpu: 4, concurrency: 1 },
   async (req) => {
     logger.info('generateVideo: appel', { uid: req.auth?.uid, data: req.data });
     const uid = req.auth?.uid;
@@ -375,12 +375,15 @@ export const generateVideo = onCall(
       await bucket.file(finalPath).download({ destination: audio });
 
       logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate, durationSec: sound.finalDurationSec ?? null });
-      // -threads 2 borne la mémoire de x264 (buffers de trames par thread)
+      // Image fixe : toutes les trames sont identiques, donc « ultrafast » ne coûte
+      // aucune qualité mais évite le dépassement du délai sur les sons longs.
+      // Qualité pilotée par CRF, le débit réglé servant de plafond : viser un débit
+      // constant produirait des centaines de Mo de bits inutiles.
       await runFfmpeg(['-y', '-loop', '1', '-framerate', String(fps), '-i', img, '-i', audio,
         '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`,
-        '-c:v', 'libx264', '-preset', 'medium', '-tune', 'stillimage', '-threads', '2',
-        '-b:v', vBitrate + 'k', '-maxrate', vBitrate + 'k', '-bufsize', (vBitrate * 2) + 'k',
-        '-g', String(fps * 2),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage', '-threads', '4',
+        '-crf', '20', '-maxrate', vBitrate + 'k', '-bufsize', (vBitrate * 2) + 'k',
+        '-g', String(fps * 10),
         '-c:a', 'aac', '-b:a', aBitrate + 'k',
         '-shortest', '-movflags', '+faststart', out]);
 
