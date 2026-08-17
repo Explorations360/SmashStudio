@@ -352,8 +352,18 @@ export class SoundEditComponent implements OnInit, OnDestroy {
       this.isNew = false;
       this.router.navigate(['/sounds', ref.id], { replaceUrl: true });
     } else if (this.model.id) {
-      const { id, ...data } = this.model;
-      await this.svc.update(id, data);
+      // n'écrit QUE les champs de l'éditeur : finalPath/finalUrl/video*/assemblyStatus
+      // appartiennent au serveur et peuvent avoir changé depuis l'ouverture de la page
+      // (les réécrire ferait pointer le son vers un fichier supprimé).
+      await this.svc.update(this.model.id, {
+        title: this.model.title,
+        projectId: this.model.projectId ?? null,
+        order: this.model.order,
+        useIntro: this.model.useIntro ?? false,
+        silenceBefore: this.model.silenceBefore ?? null,
+        silenceAfter: this.model.silenceAfter ?? null,
+        segments: this.model.segments,
+      });
     }
     this.model.segments.forEach((x) => this.baseline.set(x.id, x.textV3 + '|' + x.voiceId));
     return this.model.id!;

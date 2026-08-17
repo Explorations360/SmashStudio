@@ -351,6 +351,20 @@ export const generateVideo = onCall(
     const aBitrate = Math.min(Math.max(Number(st.videoAudioBitrate) || 192, 64), 320); // kb/s
     const fps = Math.min(Math.max(Number(st.videoFps) || 25, 1), 60);
 
+    // le MP3 référencé peut avoir disparu (fiche désynchronisée) → on retombe sur
+    // le dernier final-*.mp3 du dossier et on répare la fiche au passage
+    let finalPath: string = sound.finalPath;
+    const [exists] = await bucket.file(finalPath).exists();
+    if (!exists) {
+      const [files] = await bucket.getFiles({ prefix: `audio/sounds/${soundId}/final-` });
+      const latest = files.map((f) => f.name).sort().pop();
+      if (!latest) throw new HttpsError('failed-precondition', 'MP3 assemblé introuvable — relance « Assembler le MP3 »');
+      logger.warn('generateVideo: finalPath obsolète, repli sur le dernier assemblage', { soundId, was: finalPath, now: latest });
+      const [freshUrl] = await bucket.file(latest).getSignedUrl({ action: 'read', expires: '2491-01-01' });
+      await ref.update({ finalPath: latest, finalUrl: freshUrl, updatedAt: Date.now() });
+      finalPath = latest;
+    }
+
     await ref.update({ videoStatus: 'generating', updatedAt: Date.now() });
     const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'vid-'));
     try {
@@ -358,7 +372,7 @@ export const generateVideo = onCall(
       const audio = nodePath.join(tmp, 'audio.mp3');
       const out = nodePath.join(tmp, 'video.mp4');
       await bucket.file(imagePath).download({ destination: img });
-      await bucket.file(sound.finalPath).download({ destination: audio });
+      await bucket.file(finalPath).download({ destination: audio });
 
       logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate, durationSec: sound.finalDurationSec ?? null });
       // -threads 2 borne la mémoire de x264 (buffers de trames par thread)
@@ -372,14 +386,16 @@ export const generateVideo = onCall(
 
       // libère la RAM des sources (/tmp = tmpfs) avant l'envoi
       for (const f of [img, audio]) { try { fs.rmSync(f, { force: true }); } catch { /* déjà parti */ } }
+      logger.info('generateVideo: encodage terminé', { soundId, bytes: fs.statSync(out).size });
 
       const destPath = `video/sounds/${soundId}/video-${Date.now()}.mp4`;
       await bucket.upload(out, { destination: destPath, metadata: { contentType: 'video/mp4' } });
+      // purge les anciens MP4 du son
+      try {
+        const [olds] = await bucket.getFiles({ prefix: `video/sounds/${soundId}/video-` });
+        for (const f of olds) if (f.name !== destPath) await f.delete().catch(() => { /* déjà parti */ });
+      } catch (e: any) { logger.warn('generateVideo: purge des anciens MP4 échouée — ' + String(e?.message || e), { soundId }); }
       const [url] = await bucket.file(destPath).getSignedUrl({ action: 'read', expires: '2491-01-01' });
-      if (sound.videoPath && sound.videoPath !== destPath) {
-        try { await bucket.file(sound.videoPath).delete(); }
-        catch (e: any) { logger.warn('generateVideo: ancienne vidéo non supprimée — ' + String(e?.message || e), { soundId }); }
-      }
       const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
       // version propre au MP4, incrémentée à chaque génération
       const videoVersion = (Number(sound.videoVersion) || 0) + 1;
@@ -489,11 +505,12 @@ export const assembleSound = onCall(
       const destPath = `audio/sounds/${soundId}/${isPreview ? 'preview' : 'final'}-${Date.now()}.mp3`;
       await bucket.upload(out, { destination: destPath, metadata: { contentType: 'audio/mpeg' } });
       const [url] = await bucket.file(destPath).getSignedUrl({ action: 'read', expires: '2491-01-01' });
-      const oldPath = isPreview ? sound.previewPath : sound.finalPath;
-      if (oldPath && oldPath !== destPath) {
-        try { await bucket.file(oldPath).delete(); }
-        catch (e: any) { logger.warn('assembleSound: ancien fichier non supprimé — ' + String(e?.message || e), { soundId, oldPath }); }
-      }
+      // purge tous les anciens fichiers du même type (plus fiable que suivre l'ancien
+      // chemin de la fiche, qui peut être périmé) — le nouveau est conservé
+      try {
+        const [olds] = await bucket.getFiles({ prefix: `audio/sounds/${soundId}/${isPreview ? 'preview' : 'final'}-` });
+        for (const f of olds) if (f.name !== destPath) await f.delete().catch(() => { /* déjà parti */ });
+      } catch (e: any) { logger.warn('assembleSound: purge des anciens fichiers échouée — ' + String(e?.message || e), { soundId }); }
       const sizeMb = Math.round(fs.statSync(out).size / 1024 / 1024 * 10) / 10;
       let durationSec = 0;
       try { durationSec = Math.round(parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', out]))); }
