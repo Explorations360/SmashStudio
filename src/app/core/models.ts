@@ -96,6 +96,7 @@ export interface Settings {
   similarityBoost: number;
   style: number;
   voices: VoiceSlot[];     // palette de voix proposée dans l'éditeur de segments
+  trimEndDb: number;          // seuil (dB) sous lequel la fin d'un segment généré (souffle, respiration) est coupée ; 0 = désactivé
   segmentGap: number;         // pause par défaut entre deux segments, en secondes (0 à 10)
   audioSilenceBefore: number; // silence au début du fichier final, en secondes (0 à 10)
   audioSilenceAfter: number;  // silence à la fin du fichier final, en secondes (0 à 10)
@@ -133,6 +134,7 @@ export const DEFAULT_SETTINGS: Settings = {
     { label: 'Voix homme principale', voiceId: '', voiceName: '' },
     { label: 'Voix homme secondaire', voiceId: '', voiceName: '' },
   ],
+  trimEndDb: -35,
   segmentGap: 0.4,
   audioSilenceBefore: 0,
   audioSilenceAfter: 0,

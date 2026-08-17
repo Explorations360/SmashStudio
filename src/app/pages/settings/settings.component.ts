@@ -95,6 +95,10 @@ import { Settings, DEFAULT_SETTINGS, VoiceSlot } from '../../core/models';
           <input [(ngModel)]="s.audioSilenceAfter" type="number" step="0.5" min="0" max="10" class="w-full border rounded px-2 py-1 mt-1"
             title="Silence ajouté à la toute fin du fichier final assemblé (0 à 10 s)" />
         </label>
+        <label>Coupe du souffle final (dB)
+          <input [(ngModel)]="s.trimEndDb" type="number" step="1" min="-60" max="0" class="w-full border rounded px-2 py-1 mt-1"
+            title="À la génération, la fin du segment est coupée tant qu'elle reste sous ce niveau : les respirations laissées par ElevenLabs disparaissent. -35 dB par défaut ; vers 0 = coupe plus agressive, vers -60 = coupe seulement le quasi-silence ; 0 = désactivé. Ne s'applique qu'aux segments (re)générés." />
+        </label>
         <label>Stability <input [(ngModel)]="s.stability" type="number" step="0.05" min="0" max="1" class="w-full border rounded px-2 py-1 mt-1" /></label>
         <label>Similarity boost <input [(ngModel)]="s.similarityBoost" type="number" step="0.05" min="0" max="1" class="w-full border rounded px-2 py-1 mt-1" /></label>
         <label>Style <input [(ngModel)]="s.style" type="number" step="0.05" min="0" max="1" class="w-full border rounded px-2 py-1 mt-1" /></label>

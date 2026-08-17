@@ -171,8 +171,16 @@ export const generateSegment = onCall(
         logger.error('generateSegment: ElevenLabs en erreur', { soundId, segmentId, status: resp.status, body });
         throw new HttpsError('internal', 'ElevenLabs: ' + resp.status + ' ' + body.slice(0, 300));
       }
-      const buf = Buffer.from(await resp.arrayBuffer());
+      let buf = Buffer.from(await resp.arrayBuffer());
       logger.info('generateSegment: audio reçu', { soundId, segmentId, bytes: buf.length });
+
+      // ElevenLabs laisse parfois un souffle (respiration) en fin de segment :
+      // on le coupe dès la génération, ainsi le fichier source est propre pour tous les assemblages
+      const trimRaw = st.trimEndDb;
+      const trimEndDb = (trimRaw === undefined || trimRaw === null || trimRaw === '') ? -35 : Number(trimRaw);
+      if (isFinite(trimEndDb) && trimEndDb < 0) {
+        buf = await trimTrailingBreath(buf, Math.min(Math.max(trimEndDb, -60), -20), { soundId, segmentId });
+      }
 
       // nom versionné : l'URL change à chaque génération, sinon le navigateur
       // ressert l'ancien audio depuis son cache (même chemin → même URL signée)
@@ -706,6 +714,45 @@ Règles strictes :
     return { tagged };
   }
 );
+
+/**
+ * Coupe le souffle (respiration) que ElevenLabs laisse parfois en fin de segment.
+ * Astuce ffmpeg : l'audio est renversé, silenceremove retire tout ce qui reste sous
+ * le seuil (dB) au début — donc à la fin réelle — en conservant 0,1 s de queue,
+ * puis un court fondu (50 ms) évite un clic de coupe, et on renverse à nouveau.
+ * En cas d'échec ffmpeg ou de résultat quasi vide, l'audio d'origine est conservé.
+ */
+async function trimTrailingBreath(buf: Buffer, thresholdDb: number, ctx: { soundId: string; segmentId: string }): Promise<Buffer> {
+  const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'trim-'));
+  const inF = nodePath.join(tmp, 'in.mp3');
+  const outF = nodePath.join(tmp, 'out.mp3');
+  try {
+    fs.writeFileSync(inF, buf);
+    const filter = 'areverse,'
+      + `silenceremove=start_periods=1:start_threshold=${thresholdDb}dB:start_silence=0.1,`
+      + 'afade=t=in:d=0.05,areverse';
+    await runFfmpeg(['-y', '-i', inF, '-af', filter, '-ac', '2', '-ar', '44100', '-c:a', 'libmp3lame', '-b:a', '128k', outF]);
+    const out = fs.readFileSync(outF);
+    if (out.length < 1000) {
+      // segment entier sous le seuil : coupe aberrante, on garde l'original
+      logger.warn('trimTrailingBreath: résultat quasi vide, audio d\'origine conservé', { ...ctx, thresholdDb, outBytes: out.length });
+      return buf;
+    }
+    let trimmedSec = 0;
+    try {
+      const inDur = parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', inF]));
+      const outDur = parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', outF]));
+      trimmedSec = Math.round((inDur - outDur) * 100) / 100;
+    } catch (e: any) { logger.warn('trimTrailingBreath: durées non mesurées — ' + String(e?.message || e), ctx); }
+    logger.info('trimTrailingBreath: fin de segment nettoyée', { ...ctx, thresholdDb, trimmedSec });
+    return out;
+  } catch (e: any) {
+    logger.warn('trimTrailingBreath: échec ffmpeg, audio d\'origine conservé — ' + String(e?.message || e), ctx);
+    return buf;
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* tmp éphémère */ }
+  }
+}
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
