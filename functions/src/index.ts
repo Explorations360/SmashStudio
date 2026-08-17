@@ -374,21 +374,37 @@ export const generateVideo = onCall(
       await bucket.file(imagePath).download({ destination: img });
       await bucket.file(finalPath).download({ destination: audio });
 
-      logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate, durationSec: sound.finalDurationSec ?? null });
+      // 1) Redimensionne l'image UNE FOIS au format cible. Sans cette étape, ffmpeg
+      // re-décode et redimensionne la source à chaque trame : une photo de 36 Mpx
+      // rend l'encodage interminable.
+      const still = nodePath.join(tmp, 'still.png');
+      await runFfmpeg(['-y', '-i', img, '-frames:v', '1',
+        '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`,
+        still]);
+      try { fs.rmSync(img, { force: true }); } catch { /* déjà parti */ }
+
+      // 2) Durée explicite tirée du MP3 : avec « -loop 1 » le flux vidéo est infini,
+      // mieux vaut ne pas dépendre du seul « -shortest ».
+      let durationSec = Number(sound.finalDurationSec) || 0;
+      try { durationSec = parseFloat(await runFfprobe(['-show_entries', 'format=duration', '-of', 'csv=p=0', audio])) || durationSec; }
+      catch (e: any) { logger.warn('generateVideo: durée du MP3 non mesurée — ' + String(e?.message || e), { soundId }); }
+      if (!durationSec) throw new HttpsError('failed-precondition', 'Durée du MP3 indéterminée — réassemble le son');
+
+      logger.info('generateVideo: encodage', { soundId, w, h, fps, vBitrate, aBitrate, durationSec });
       // Image fixe : toutes les trames sont identiques, donc « ultrafast » ne coûte
       // aucune qualité mais évite le dépassement du délai sur les sons longs.
       // Qualité pilotée par CRF, le débit réglé servant de plafond : viser un débit
       // constant produirait des centaines de Mo de bits inutiles.
-      await runFfmpeg(['-y', '-loop', '1', '-framerate', String(fps), '-i', img, '-i', audio,
-        '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`,
+      await runFfmpeg(['-y', '-loop', '1', '-framerate', String(fps), '-i', still, '-i', audio,
+        '-t', durationSec.toFixed(3),
         '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage', '-threads', '4',
         '-crf', '20', '-maxrate', vBitrate + 'k', '-bufsize', (vBitrate * 2) + 'k',
-        '-g', String(fps * 10),
+        '-g', String(fps * 10), '-pix_fmt', 'yuv420p',
         '-c:a', 'aac', '-b:a', aBitrate + 'k',
         '-shortest', '-movflags', '+faststart', out]);
 
       // libère la RAM des sources (/tmp = tmpfs) avant l'envoi
-      for (const f of [img, audio]) { try { fs.rmSync(f, { force: true }); } catch { /* déjà parti */ } }
+      for (const f of [still, audio]) { try { fs.rmSync(f, { force: true }); } catch { /* déjà parti */ } }
       logger.info('generateVideo: encodage terminé', { soundId, bytes: fs.statSync(out).size });
 
       const destPath = `video/sounds/${soundId}/video-${Date.now()}.mp4`;
