@@ -93,6 +93,9 @@ import { Sound, Segment, Settings, DEFAULT_SETTINGS, blankSegment } from '../../
             @if (seg.audioUrl && seg.status === 'generated') {
               <button (click)="togglePreview(seg)" class="text-xs bg-navy-700 hover:bg-navy-600 text-white px-2.5 py-1 rounded-full"
                 [title]="previewId() === seg.id ? 'Arrêter l\\'écoute' : 'Écouter ce segment'">{{ previewId() === seg.id ? '⏹' : '▶' }}</button>
+              <button (click)="downloadSegment(seg, i)" [disabled]="segDownloading().has(seg.id)"
+                class="text-xs border rounded px-1.5 py-1 hover:bg-white/10 disabled:opacity-40"
+                title="Télécharger le MP3 de ce segment">{{ segDownloading().has(seg.id) ? '…' : '⬇' }}</button>
             }
             <button (click)="genOne(seg)" [disabled]="genBusy().has(seg.id) || !seg.voiceId || !seg.textV3.trim()"
               [title]="seg.status === 'generated' ? 'Régénérer la voix de ce segment (remplace l\\'audio)' : 'Générer la voix de ce segment'"
@@ -565,6 +568,30 @@ export class SoundEditComponent implements OnInit, OnDestroy {
     } catch {
       window.open(this.model.videoUrl, '_blank');
     } finally { this.downloadingVideo.set(false); }
+  }
+
+  // téléchargement du MP3 d'un segment : « titre - 03 - Voix femme principale.mp3 »
+  segDownloading = signal<Set<string>>(new Set());
+  async downloadSegment(seg: Segment, index: number) {
+    if (!seg.audioUrl) return;
+    this.segDownloading.update((s) => new Set(s).add(seg.id));
+    const clean = (t: string) => t.replace(/[\\/:*?"<>|]+/g, '-');
+    const name = [clean(this.model.title || 'son'), String(index + 1).padStart(2, '0'), clean(seg.voiceName || 'voix')]
+      .join(' - ') + '.mp3';
+    try {
+      const resp = await fetch(seg.audioUrl);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      window.open(seg.audioUrl, '_blank');
+    } finally {
+      this.segDownloading.update((s) => { const n = new Set(s); n.delete(seg.id); return n; });
+    }
   }
 
   // pré-écoute d'un segment
