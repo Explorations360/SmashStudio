@@ -575,9 +575,10 @@ export class SoundEditComponent implements OnInit, OnDestroy {
   async downloadSegment(seg: Segment, index: number) {
     if (!seg.audioUrl) return;
     this.segDownloading.update((s) => new Set(s).add(seg.id));
-    const clean = (t: string) => t.replace(/[\\/:*?"<>|]+/g, '-');
-    const name = [clean(this.model.title || 'son'), String(index + 1).padStart(2, '0'), clean(seg.voiceName || 'voix')]
-      .join(' - ') + '.mp3';
+    // nom parlant : numéro + début du texte prononcé (balises retirées)
+    const clean = (t: string) => t.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim();
+    const start = clean(this.stripTags(seg.textV3)).slice(0, 60).replace(/\s+\S*$/, '') || 'segment';
+    const name = [String(index + 1).padStart(2, '0'), start].join(' - ') + '.mp3';
     try {
       const resp = await fetch(seg.audioUrl);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
